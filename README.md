@@ -132,3 +132,64 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - AtCoder スクレイピング / API 連携による提出データの自動取得（`sync` ルーターの実装）
 - Streamlit の Analysis・Problems ページの UI 実装（Plotly グラフ）
 - Alembic によるデータベースマイグレーション管理の導入
+
+---
+
+### 2026-05-04 — ABC 自動レポートシステムの構築 & AI プロバイダー移行
+
+#### ✅ 実装内容
+
+**1. AtCoder-MySolutions リポジトリの新規構築**
+
+- `AtCoder-MySolutions/` を新規作成し、`git init` + リモート設定（`uta516/AtCoder-MySolutions`）を実施
+- 既存リポジトリ（手書き解法 `.txt` 12本 / ABC447〜ABC456）と `--allow-unrelated-histories` でコンフリクトなくマージ
+
+**2. `scripts/auto_reporter.py` — 完全自動解析スクリプト**
+
+- AtCoder Problems API から `uta516` の当日 ABC 提出を全取得し、問題ごとに**最新の1提出**を採用
+- BeautifulSoup4 で問題文・制約・入出力をスクレイピング、提出コードも取得
+- 判定結果に応じて AI 解説を生成：
+  - `AC` → 計算量最適化済み Python 模範解答 + アルゴリズム解説
+  - `WA/TLE/RE` → 不正解原因の分析（エッジケース・計算量）+ 正解模範解答
+- `(コンテスト番号)_(MMDD).md` 形式でレポートを自動保存（例：`457_0510.md`）
+
+**3. `.github/workflows/abc_auto_report.yml` — GitHub Actions 定義**
+
+- `cron: '0 14 * * 6'`（毎週土曜 23:00 JST）でスケジュール実行
+- `workflow_dispatch` で手動トリガーにも対応
+- `permissions: contents: write` を付与し、`GITHUB_TOKEN` で自動コミット・プッシュ
+- 生成ファイルがない場合（コンテスト未開催日）は `git diff --staged --quiet` で空コミットを防止
+
+**4. Anthropic → Google Gemini への AI プロバイダー移行**
+
+- `requirements.txt`：`anthropic` を `google-generativeai>=0.8.0` に置き換え
+- `generate_ai_explanation()`：`anthropic.Anthropic()` → `genai.GenerativeModel("gemini-1.5-flash")` に書き換え
+- GitHub Actions の環境変数：`ANTHROPIC_API_KEY` → `GEMINI_API_KEY`
+- README・コメント類の Anthropic 関連記述をすべて Gemini 向けに更新
+
+**5. `CLAUDE.md` カスタムルールの追加**
+
+- 「作業終了」発言をトリガーとする**終了ルーティン**を定義
+  1. チャット履歴・git diff から実装内容・エラー・解決策を自動解析
+  2. `README.md` 開発ログへ Markdown 形式で追記
+  3. `git add .` → `git commit` → `git push origin main` を全自動実行
+
+#### 🐛 発生したエラーと原因・解決策
+
+| エラー | 原因 | 解決策 |
+|-------|------|-------|
+| `sync.ps1` が実行できない | Claude のツールは `-NonInteractive` モードで動作するため `Read-Host` がブロックされる | `! .\sync.ps1` でユーザー自身がターミナルから直接実行するよう案内 |
+| `git push` で `fatal: protocol '[https' is not supported` | リモート URL が `[https://github.com/]` という不正な形式で登録されていた | `git remote set-url origin https://github.com/uta516/algolens-web` で正しい URL に修正 |
+| AtCoder-MySolutions への初回プッシュ失敗 | GitHub 上にリポジトリが未作成だった | `github.com/new` でリポジトリ作成後に再プッシュ |
+
+#### 🔧 技術的なポイント
+
+- Gemini API はシステムプロンプトとユーザーメッセージを**シングルターンで結合**して送信（Claude の `system` / `messages` 分離構造とは異なる）
+- `git diff --staged --quiet || git commit` パターンにより、提出がない週の Actions で空コミットが発生しないよう制御
+- `--allow-unrelated-histories` による異なる git 系譜のマージはコンフリクトなしで完了（ファイル種別 `.txt` vs `.md/.py/.yml` が重複しなかったため）
+
+#### 🚀 次回の目標
+
+- `GEMINI_API_KEY` を GitHub Secrets に登録して自動レポートを初稼働させる
+- Streamlit の Analysis・Sync ページ UI 実装（Plotly グラフ）
+- AlgoLens の `sync` ルーター：AtCoder スクレイピングによる提出データ自動取得
