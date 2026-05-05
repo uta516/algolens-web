@@ -9,9 +9,10 @@ class TagStat(BaseModel):
 
 
 class DifficultyBucket(BaseModel):
-    bucket: str  # e.g. "灰", "茶", "緑", "水", "青", "黄", "橙", "赤"
+    bucket: str  # "灰","茶","緑","水","青","黄","橙","赤"
     total: int
     ac_count: int
+    ac_rate: float
 
 
 class AnalysisSummary(BaseModel):

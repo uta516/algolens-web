@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import Base, engine
-from app.routers import analysis, problems, submissions, sync, users
+from app.routers import analysis, knowledge, problems, submissions, sync, users
 
 # テーブルを自動作成（Alembicに移行するまでの暫定）
 Base.metadata.create_all(bind=engine)
@@ -25,6 +25,7 @@ app.include_router(users.router)
 app.include_router(problems.router)
 app.include_router(submissions.router)
 app.include_router(analysis.router)
+app.include_router(knowledge.router)
 app.include_router(sync.router)
 
 

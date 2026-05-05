@@ -17,7 +17,6 @@ STATUS_ICONS = {
 }
 
 
-@st.cache_data(ttl=120)
 def fetch_problems(contest_id: str, limit: int):
     params = {"limit": limit}
     if contest_id:
@@ -26,7 +25,6 @@ def fetch_problems(contest_id: str, limit: int):
     return r.json() if r.ok else []
 
 
-@st.cache_data(ttl=120)
 def fetch_submissions(user_id: int | None, status: str, limit: int):
     params = {"limit": limit}
     if user_id:
@@ -50,6 +48,9 @@ username = st.sidebar.text_input(
 )
 if username:
     st.session_state["username"] = username
+
+if st.sidebar.button("🔄 データを再取得"):
+    st.rerun()
 
 tab_problems, tab_submissions = st.tabs(["問題一覧", "提出記録"])
 

@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -10,9 +9,10 @@ from app.schemas.analysis import AnalysisSummary, DifficultyBucket, TagStat
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
-# AtCoder Problems の difficulty → 色 マッピング
+# 灰(0-399), 茶(400-799), 緑(800-1199), 水(1200-1599),
+# 青(1600-1999), 黄(2000-2399), 橙(2400-2799), 赤(2800+)
 _DIFFICULTY_BUCKETS = [
-    ("灰", -float("inf"), 400),
+    ("灰", 0, 400),
     ("茶", 400, 800),
     ("緑", 800, 1200),
     ("水", 1200, 1600),
@@ -21,11 +21,10 @@ _DIFFICULTY_BUCKETS = [
     ("橙", 2400, 2800),
     ("赤", 2800, float("inf")),
 ]
+_BUCKET_ORDER = [name for name, *_ in _DIFFICULTY_BUCKETS]
 
 
-def _difficulty_to_color(diff: float | None) -> str:
-    if diff is None:
-        return "不明"
+def _difficulty_to_color(diff: float) -> str:
     for name, lo, hi in _DIFFICULTY_BUCKETS:
         if lo <= diff < hi:
             return name
@@ -73,20 +72,25 @@ def get_analysis(username: str, db: Session = Depends(get_db)):
         for t, v in sorted(tag_map.items(), key=lambda x: -x[1]["total"])
     ]
 
-    # 難易度別集計
-    diff_map: dict[str, dict] = {name: {"total": 0, "ac": 0} for name, *_ in _DIFFICULTY_BUCKETS}
-    diff_map["不明"] = {"total": 0, "ac": 0}
+    # 難易度別集計 - DBに保存された difficulty を使用（外部API呼び出し不要）
+    diff_map: dict[str, dict] = {name: {"total": 0, "ac": 0} for name in _BUCKET_ORDER}
     for sub, prob in subs:
-        bucket = _difficulty_to_color(prob.difficulty)
-        diff_map.setdefault(bucket, {"total": 0, "ac": 0})
+        diff = prob.difficulty
+        if diff is None or diff < 0:
+            continue
+        bucket = _difficulty_to_color(diff)
         diff_map[bucket]["total"] += 1
         if sub.status == "AC":
             diff_map[bucket]["ac"] += 1
 
-    order = ["灰", "茶", "緑", "水", "青", "黄", "橙", "赤", "不明"]
     difficulty_stats = [
-        DifficultyBucket(bucket=b, total=diff_map[b]["total"], ac_count=diff_map[b]["ac"])
-        for b in order
+        DifficultyBucket(
+            bucket=b,
+            total=diff_map[b]["total"],
+            ac_count=diff_map[b]["ac"],
+            ac_rate=round(diff_map[b]["ac"] / diff_map[b]["total"], 3) if diff_map[b]["total"] else 0.0,
+        )
+        for b in _BUCKET_ORDER
         if diff_map[b]["total"] > 0
     ]
 

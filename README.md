@@ -135,6 +135,77 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 
 ---
 
+### 2026-05-05 — 難易度分析グラフ・AI ナレッジベース・データ同期の全面実装
+
+#### ✅ 実装内容
+
+**1. `services/atcoder.py` — 難易度データ取得サービス**
+
+- AtCoder Problems API (`problem-models.json`) から全問題の推定難易度を取得する `fetch_problem_models()` を実装
+- 新規パッケージ `google-genai 1.75.0` を `requirements.txt` に追加
+
+**2. `routers/analysis.py` & `schemas/analysis.py` — 難易度集計の完全修正**
+
+- 難易度バケット分類を外部 API 呼び出しからDB保存済みの `prob.difficulty` 直接参照に変更（パフォーマンス改善・オフライン動作対応）
+- `DifficultyBucket` スキーマに `ac_rate: float` を追加
+- 8色バケット（灰0-399 / 茶400-799 / 緑800-1199 / 水1200-1599 / 青1600-1999 / 黄2000-2399 / 橙2400-2799 / 赤2800+）で集計
+
+**3. `frontend/pages/4_Analysis.py` — Plotly グラフ実装**
+
+- 難易度別 AC 問題数・正答率を `px.bar` で2カラム並列表示
+- AtCoder 公式カラー（灰 `#808080` 〜 赤 `#FF0000`）を `color_discrete_map` で各バーに適用
+- X 軸を `pd.Categorical` で灰→赤の順に固定
+- `@st.cache_data` を削除してDBデータが常に最新反映されるよう修正
+
+**4. `backend/scripts/sync_atcoder_data.py` — hiyokosann 専用同期スクリプト**
+
+- `merged-problems.json` + `problem-models.json` → DB へ一括 upsert（8,508 問）
+- hiyokosann のユーザー登録と提出データ（138 件）の取得・保存を自動化
+- `os.chdir(backend_dir)` で SQLite 相対パスを正確に解決
+
+**5. `routers/knowledge.py` + `schemas/knowledge.py` — AI ナレッジベース API**
+
+- `GET /knowledge/patterns`：難易度 0〜799 の C 問題（345 件）を Gemini で分析し「制約の傾向・頻出アルゴリズム・解法の定石」を JSON 返却
+- `GET /knowledge/weekly-insights/{username}`：直近提出を Gemini で解析し「再利用コードパターン・今週の学び」を返却
+- `GET /knowledge/ping`：API キーの疎通を即確認できる診断エンドポイント
+- インメモリキャッシュ（TTL 1時間）で Gemini 呼び出しコストを削減
+
+**6. `frontend/pages/5_AI_Knowledge_Base.py` — AI ナレッジページ**
+
+- パターン分析・Weekly Insights を `st.container(border=True)` カード形式で表示
+- 頻出アルゴリズムをカラーチップ風 HTML で横並び表示
+- エラー種別（401/429/503/接続不可）ごとに対処法を表示
+
+**7. ページ構成の整理**
+
+- `2_Knowledge_Base.py`（静的チートシート）を git 履歴から完全復元
+- AI版を `5_AI_Knowledge_Base.py` として独立配置、2 ページが共存
+
+#### 🐛 発生したエラーと原因・解決策
+
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| `sync_atcoder_data.py` の最終行で `UnicodeEncodeError` | Windows の cp932 環境で絵文字（✅）を出力しようとした | 絵文字を `[DONE]` に置換 |
+| `knowledge.py` で 500 Internal Server Error | `GenerateContentConfig(response_mime_type="application/json")` が `google-genai 1.75.0` で不安定（空レスポンスを返す） | `response_mime_type` を削除し、`_parse_json()` でマークダウンブロックを除去してからパース |
+| `gemini-2.0-flash` で 404 Not Found | 無料枠でのクォータが 0（非対応モデル） | `gemini-1.5-flash`（無料枠 15RPM/100万トークン/日）に切り替え |
+| `gemini-2.0-flash` で 429 RESOURCE_EXHAUSTED | 無料枠のクォータが `limit: 0`（完全ゼロ） | `gemini-1.5-flash` に戻す。429 のハンドリングとレート制限案内もフロントエンドに追加 |
+| `2_Knowledge_Base.py` が重複削除 | AI版リネーム時に誤って静的ページを削除 | `git show HEAD:...` で完全復元 |
+| Streamlit リロードで古いデータが表示される | `@st.cache_data(ttl=60〜120)` がDB同期後も古いレスポンスを保持 | DB直結エンドポイントのキャッシュを削除。Gemini エンドポイントは TTL=3600 を維持 |
+
+#### 🔧 技術的なポイント
+
+- `google-genai` の `response.text` は安全フィルタ発動時に `None` を返すため、空チェックを必須化
+- Gemini のレスポンスは ` ```json ` ブロックで囲まれることがあるため `re.sub` で除去してから `json.loads`
+- API キーの形式検証（`AIza` プレフィックス + 39 文字）をクライアント初期化前に実施し、不正キーを早期に 503 で返す
+
+#### 🚀 次回の目標
+
+- `GEMINI_API_KEY` の有料プランへの移行または利用量管理
+- Analysis ページの Plotly グラフ動作確認（実データでの表示テスト）
+- Sync ページからのワンクリックデータ更新フローの完成
+
+---
+
 ### 2026-05-04 — ABC 自動レポートシステムの構築 & AI プロバイダー移行
 
 #### ✅ 実装内容
