@@ -95,7 +95,6 @@ def _show_error(err: str):
     elif err == "quota_exceeded":
         st.warning(
             "**Gemini API の無料枠クォータを超過しています（429）。**\n\n"
-            "- `gemini-1.5-flash` の無料枠: 15 リクエスト/分、100 万トークン/日\n"
             "- しばらく待ってから再度お試しください（通常 1 分程度でリセット）\n"
             "- 使用量の確認: https://ai.dev/rate-limit"
         )

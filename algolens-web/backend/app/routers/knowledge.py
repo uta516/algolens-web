@@ -63,7 +63,7 @@ def _call_gemini(client, prompt: str) -> str:
     try:
         from google.genai import types
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.3),
         )
@@ -120,7 +120,7 @@ def ping_gemini():
         from google import genai
         client = genai.Client(api_key=key)
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash-lite",
             contents="Reply with the single word: OK",
         )
         return {"ok": True, "response": (response.text or "").strip()}
@@ -163,7 +163,7 @@ def get_patterns(db: Session = Depends(get_db)):
             detail="C問題データが DB にありません。先に /sync/problems を実行してください。",
         )
 
-    sample = problems[:60]
+    sample = problems[:15]
     problem_lines = "\n".join(
         f"- [{p.title}] difficulty={p.difficulty:.0f} tags={p.tags or '未設定'}"
         for p in sample
@@ -176,9 +176,9 @@ def get_patterns(db: Session = Depends(get_db)):
 
 これらを分析し、以下の JSON のみを返してください（説明文や追加のテキストは不要）:
 {{
-  "constraints_tendency": "制約の傾向を200文字程度で説明（日本語）",
+  "constraints_tendency": "制約から解法を絞り込むための目安を、以下のような形式のマークダウン箇条書きで列挙してください（日本語）:\\n- N ≦ 100 → O(N^3) の全探索が通る\\n- N ≦ 10^5 → O(N log N) のソート・二分探索\\n- ... （この問題群から読み取れる具体的な目安を5〜8個）",
   "frequent_algorithms": ["アルゴリズム1", "アルゴリズム2"],
-  "solving_patterns": "解法の定石・よくある思考ステップを300文字程度で説明（日本語）"
+  "solving_patterns": "問題文に出てくるキーワードと最適解法の紐付けを、以下のような形式のマークダウン箇条書きで列挙してください（日本語）:\\n- 「最大値の最小化」「最小値の最大化」→ 二分探索\\n- 「条件を満たす通り数」「場合の数」→ DP\\n- ... （この問題群から読み取れる典型パターンを5〜8個）"
 }}
 """
 
@@ -241,7 +241,7 @@ def get_weekly_insights(username: str, db: Session = Depends(get_db)):
             .join(Problem, Submission.problem_id == Problem.id)
             .filter(Submission.user_id == user.id)
             .order_by(Submission.submitted_at.desc())
-            .limit(20)
+            .limit(15)
             .all()
         )
 
@@ -272,7 +272,7 @@ AtCoder ユーザー「{username}」の直近の提出データ（{total}件、A
 
 このデータを元に、以下の JSON のみを返してください:
 {{
-  "reusable_snippets": "使い回せそうなコードパターン・テンプレートを具体的に200文字程度で説明（日本語）",
+  "reusable_snippets": "提出データから読み取れる典型実装パターンを、Notionのチートシートのようなマークダウン形式でまとめてください（日本語）。\\n各パターンは以下のフォーマットで記述してください:\\n### 〇〇の典型\\n- ポイント1\\n- ポイント2\\n\\n（2〜3個のパターンを抽出）",
   "key_learnings": "学びと改善点を200文字程度でまとめる（日本語）"
 }}
 """
