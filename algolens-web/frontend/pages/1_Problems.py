@@ -119,7 +119,12 @@ with tab_submissions:
         df_sub["status"] = df_sub["status"].map(
             lambda s: f"{STATUS_ICONS.get(s, '⚪')} {s}"
         )
-        df_sub["submitted_at"] = pd.to_datetime(df_sub["submitted_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        df_sub["submitted_at"] = (
+            pd.to_datetime(df_sub["submitted_at"])
+            .dt.tz_localize("UTC")
+            .dt.tz_convert("Asia/Tokyo")
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
         df_sub = df_sub.rename(columns={
             "id": "ID",
             "problem_id": "問題 ID",

@@ -5,6 +5,8 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+JST = timezone(timedelta(hours=9))
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -13,7 +15,7 @@ from app.core.database import get_db
 from app.models.problem import Problem
 from app.models.submission import Submission
 from app.models.user import User
-from app.schemas.knowledge import PatternAnalysis, ProblemSummary, WeeklyInsights
+from app.schemas.knowledge import PatternAnalysis, ProblemSummary, StudyGuide, WeeklyInsights
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -65,7 +67,10 @@ def _call_gemini(client, prompt: str) -> str:
         response = client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.3),
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                response_mime_type="application/json",
+            ),
         )
         text = response.text
         if not text:
@@ -94,13 +99,31 @@ def _call_gemini(client, prompt: str) -> str:
 
 
 def _parse_json(text: str) -> dict:
-    """マークダウンコードブロックを除去して JSON をパースする。"""
-    # ```json ... ``` や ``` ... ``` を剥がす
+    """マークダウンコードブロックを除去して JSON をパースする（多段フォールバック）。"""
+    text = text.strip()
+
+    # Step1: response_mime_type=application/json なら既に純粋な JSON のはず
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Step2: ```json ... ``` や ``` ... ``` を剥がす
     cleaned = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        return {}
+        pass
+
+    # Step3: テキスト中の最初の {...} ブロックを抽出
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +218,7 @@ def get_patterns(db: Session = Depends(get_db)):
         constraints_tendency=parsed.get("constraints_tendency") or raw[:400],
         frequent_algorithms=parsed.get("frequent_algorithms") or [],
         solving_patterns=parsed.get("solving_patterns") or "",
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(JST).isoformat(),
     )
 
     _set_cached("patterns", result)
@@ -218,7 +241,7 @@ def get_weekly_insights(username: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(JST)
     # 直近7日間（先週データが空の場合も拾えるよう範囲を広げる）
     week_end = now
     week_start = now - timedelta(days=7)
@@ -289,6 +312,91 @@ AtCoder ユーザー「{username}」の直近の提出データ（{total}件、A
         ac_count=ac_count,
         reusable_snippets=parsed.get("reusable_snippets") or raw[:400],
         key_learnings=parsed.get("key_learnings") or "",
+        generated_at=now.isoformat(),
+    )
+
+    _set_cached(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /knowledge/study_guide/{username}
+# ---------------------------------------------------------------------------
+
+@router.get("/study_guide/{username}", response_model=StudyGuide)
+def get_study_guide(username: str, db: Session = Depends(get_db)):
+    """ユーザーのC問題提出履歴（WA/TLE等）を分析し、次の学習方針をAIが提案する。"""
+    cache_key = f"study_guide:{username}"
+    cached = _get_cached(cache_key)
+    if cached:
+        return cached
+
+    user = db.query(User).filter(User.atcoder_username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # C問題の提出を最大15件取得（失敗を含む全ステータス）
+    subs = (
+        db.query(Submission, Problem)
+        .join(Problem, Submission.problem_id == Problem.id)
+        .filter(
+            Submission.user_id == user.id,
+            Problem.problem_index == "C",
+        )
+        .order_by(Submission.submitted_at.desc())
+        .limit(15)
+        .all()
+    )
+
+    now = datetime.now(JST)
+
+    if not subs:
+        return StudyGuide(
+            username=username,
+            current_weakness="提出データがありません。まずC問題に挑戦してみましょう。",
+            required_code_pattern="提出データがありません。",
+            recommended_practice="AtCoder Problems で灰色〜茶色のC問題を5問解いてみましょう。",
+            generated_at=now.isoformat(),
+        )
+
+    # WA/TLE/RE の問題と AC 済み問題を分類
+    failed_subs = [(s, p) for s, p in subs if s.status in ("WA", "TLE", "RE", "MLE", "CE")]
+    ac_subs = [(s, p) for s, p in subs if s.status == "AC"]
+
+    sub_lines = "\n".join(
+        f"- [{s.status}] {p.title} (difficulty={p.difficulty or '不明'}, tags={p.tags or '未設定'}, lang={s.language or '不明'})"
+        for s, p in subs
+    )
+
+    failed_titles = ", ".join(p.title for _, p in failed_subs[:5]) or "なし"
+    ac_titles = ", ".join(p.title for _, p in ac_subs[:5]) or "なし"
+
+    prompt = f"""
+AtCoder ユーザー「{username}」のC問題提出履歴（直近{len(subs)}件）:
+
+{sub_lines}
+
+【AC済み】: {ac_titles}
+【WA/TLE/RE/MLE等の失敗あり】: {failed_titles}
+
+このデータを分析し、この人が次に何を学ぶべきかを競技プログラミングの家庭教師として具体的にアドバイスしてください。
+以下の JSON のみを返してください（説明文や追加のテキストは不要）:
+{{
+  "current_weakness": "現状足りていない要素の指摘。例: 「TLEが多い → O(N^2)の全探索から計算量を落とせていない」「WAが多い → 境界条件や整数オーバーフローの考慮漏れ」など、提出データから読み取れる具体的な弱点を2〜3点、箇条書きのマークダウンで（日本語）",
+  "required_code_pattern": "弱点を克服するために習得すべき解法・思考法と、そのPythonサンプルコードをマークダウン形式で記述（コードブロックを含む）。例: 二分探索テンプレート、累積和、など（日本語）",
+  "recommended_practice": "「次にこの問題・このタグを解くべき」という具体的なアクションプランを箇条書きのマークダウンで記述。AtCoderのタグ名や問題の具体的な種類を挙げること。さらに、一般的なアクションプランに加え、この弱点を克服するためにユーザーが次に解くべき具体的なAtCoderの過去問を2〜3問、コンテスト名・問題名とURLをセットで必ず提案すること。例: '- [ABC122 C - GeT AC](https://atcoder.jp/contests/abc122/tasks/abc122_c)'（日本語）"
+}}
+"""
+
+    client = _gemini_client()
+    raw = _call_gemini(client, prompt)
+    parsed = _parse_json(raw)
+
+    result = StudyGuide(
+        username=username,
+        current_weakness=parsed.get("current_weakness") or raw[:300],
+        required_code_pattern=parsed.get("required_code_pattern") or "",
+        recommended_practice=parsed.get("recommended_practice") or "",
         generated_at=now.isoformat(),
     )
 

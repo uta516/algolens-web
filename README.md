@@ -206,6 +206,52 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 
 ---
 
+### 2026-05-07 (2) — JST 対応・AI 学習方針エンドポイント新設・スニペット集拡充
+
+#### ✅ 実装内容
+
+**1. 全体の時刻表示を UTC → JST に統一**
+
+- `backend/app/routers/knowledge.py`：`JST = timezone(timedelta(hours=9))` を定義し、`datetime.now(timezone.utc)` を `datetime.now(JST)` に置換（`generated_at` フィールド 2 箇所）
+- `frontend/pages/5_AI_Knowledge_Base.py`：生成日時の末尾ラベルを `UTC` → `JST` に修正
+- `frontend/pages/1_Problems.py`：提出記録の時刻を `pd.to_datetime().dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")` で JST 変換してから表示
+
+**2. `GET /knowledge/study_guide/{username}` — AI 学習方針エンドポイント新設**
+
+- `backend/app/routers/knowledge.py`：ユーザーの C 問題提出履歴（直近 15 件）を取得し、WA/TLE 等の失敗パターンを Gemini で分析
+- 出力は3フィールド（`current_weakness` 弱点分析 / `required_code_pattern` 習得すべき解法＋サンプルコード / `recommended_practice` 具体的アクションプラン + 推奨過去問）
+- `backend/app/schemas/knowledge.py`：`StudyGuide` スキーマを追加
+- `frontend/pages/5_AI_Knowledge_Base.py`：セクション③「今後の学習方針 (Next Action Plan)」として3つのカードで結果を表示。再生成ボタン付き
+
+**3. Gemini JSON パース品質の強化**
+
+- Gemini API 呼び出しに `response_mime_type="application/json"` を追加
+- `_parse_json()` を多段フォールバック（① 直接 `json.loads` → ② マークダウンブロック除去 → ③ 正規表現で `{...}` 抽出）に強化し、パース失敗を大幅に削減
+
+**4. 典型アルゴリズム スニペット集の拡充**
+
+- `frontend/pages/2_Knowledge_Base.py`：グリッド BFS・ハッシュテーブル・貪欲法・ソート・めぐる式二分探索の5スニペットを新規追加
+- `frontend/pages/5_AI_Knowledge_Base.py`：セクション④「典型アルゴリズム スニペット集」として全7パターン（全探索・DP・グリッド BFS・ハッシュテーブル・貪欲法・ソート・二分探索）を `st.expander` で実装
+
+#### 🐛 発生したエラーと原因・解決策
+
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| Gemini レスポンスが `{}` にパースされ空のフィールドが返る | `response_mime_type` 未設定時、Gemini がマークダウンコードブロックで JSON を包んで返すことがある | `response_mime_type="application/json"` を追加 ＋ `_parse_json()` を多段フォールバック化 |
+| 提出一覧の時刻が UTC のまま表示される | DB 保存値は UTC ナイーブ文字列だが、変換処理がなかった | `tz_localize("UTC").tz_convert("Asia/Tokyo")` でフロントエンド側で変換 |
+
+#### 🔧 技術的なポイント
+
+- `response_mime_type="application/json"` はほぼ純粋な JSON を返すが、完全保証ではないため多段フォールバックを残すことで信頼性を二重化
+- C 問題の WA/TLE 傾向を分析するプロンプトでは、過去問の URL を含む推奨問題を必ず出力させることで、フロントエンドで clickable なリンクとして表示可能にした
+
+#### 🚀 次回の目標
+
+- `study_guide` エンドポイントの実データでの品質確認
+- `5_AI_Knowledge_Base.py` の3セクション一括表示の UX チェック
+
+---
+
 ### 2026-05-07 — Gemini モデル切り替え & AI プロンプト強化
 
 #### ✅ 実装内容

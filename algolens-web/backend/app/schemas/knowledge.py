@@ -25,3 +25,11 @@ class WeeklyInsights(BaseModel):
     reusable_snippets: str
     key_learnings: str
     generated_at: str
+
+
+class StudyGuide(BaseModel):
+    username: str
+    current_weakness: str
+    required_code_pattern: str
+    recommended_practice: str
+    generated_at: str

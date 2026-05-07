@@ -173,6 +173,161 @@ print(dp1d[W])
         )
         st.success("応用: ナップサック問題・コイン問題・LIS")
 
+    with st.expander("🗺️ 実装（dx/dy配列を使った2次元グリッドBFS）"):
+        st.info("マス目上の移動・BFS最短距離など、隣接4マスを処理する定番実装。")
+        st.code(
+            """\
+from collections import deque
+
+H, W = 5, 5
+grid = [list(input()) for _ in range(H)]  # 'S', 'G', '#', '.' など
+dx = [1, -1, 0,  0]
+dy = [0,  0, 1, -1]
+
+# スタート位置を探す
+sx, sy = 0, 0
+for i in range(H):
+    for j in range(W):
+        if grid[i][j] == 'S':
+            sx, sy = i, j
+
+# BFS で最短距離
+dist = [[-1] * W for _ in range(H)]
+dist[sx][sy] = 0
+q = deque([(sx, sy)])
+while q:
+    x, y = q.popleft()
+    for d in range(4):
+        nx, ny = x + dx[d], y + dy[d]
+        if 0 <= nx < H and 0 <= ny < W and grid[nx][ny] != '#' and dist[nx][ny] == -1:
+            dist[nx][ny] = dist[x][y] + 1
+            q.append((nx, ny))
+""",
+            language="python",
+        )
+        st.success("応用: 迷路の最短距離・連結成分カウント・多始点BFS")
+
+    with st.expander("🗂️ ハッシュテーブル（Counter / defaultdict）"):
+        st.info("要素の出現回数を素早く集計する。辞書の存在確認は平均 O(1)。")
+        st.code(
+            """\
+from collections import Counter, defaultdict
+
+# Counter: 頻度カウント
+s = "abracadabra"
+cnt = Counter(s)
+print(cnt)                  # Counter({'a': 5, 'b': 2, 'r': 2, ...})
+print(cnt['a'])             # 5
+print(cnt.most_common(2))   # [('a', 5), ('b', 2)]
+
+# defaultdict: KeyError が出ないグラフ構築
+graph = defaultdict(list)
+for u, v in [(1, 2), (1, 3), (2, 4)]:
+    graph[u].append(v)
+    graph[v].append(u)
+
+# 辞書で O(1) 存在確認
+seen = {}
+for x in [3, 1, 4, 1, 5, 9, 2, 6, 5]:
+    if x in seen:
+        print(f"{x} は重複")
+    seen[x] = True
+""",
+            language="python",
+        )
+        st.success("応用: 重複検出・グラフ構築・文字頻度分析")
+
+    with st.expander("💰 貪欲法（区間スケジューリング）"):
+        st.info("局所的に最善の選択を繰り返すことで全体最適が得られる問題に使う。")
+        st.code(
+            """\
+# 区間スケジューリング（終了時刻でソートして貪欲）
+# できるだけ多くの区間を重ならないよう選ぶ
+intervals = [(1,4),(3,5),(0,6),(5,7),(3,9),(5,9),(6,10),(8,11)]
+intervals.sort(key=lambda x: x[1])  # 終了時刻昇順
+
+count = 0
+last_end = -1
+for s, e in intervals:
+    if s >= last_end:       # 直前の区間と重ならない
+        count += 1
+        last_end = e
+print(count)   # 4
+
+# コインの両替
+coins = [500, 100, 50, 10, 5, 1]
+amount = 1234
+result = []
+for c in coins:
+    result.append(amount // c)
+    amount %= c
+print(result)   # [2, 2, 0, 3, 0, 4]
+""",
+            language="python",
+        )
+        st.success("応用: 活動選択問題・コイン問題・会議室割り当て")
+
+    with st.expander("🔢 ソート（lambda を使った複数キーソート）"):
+        st.info("タプルや複数条件での並び替え。Python の sorted() / .sort() は安定ソート（Timsort, O(N log N)）。")
+        st.code(
+            """\
+# 基本ソート
+arr = [3, 1, 4, 1, 5, 9]
+print(sorted(arr))               # 昇順
+print(sorted(arr, reverse=True)) # 降順
+
+# 複数キーソート（1st: スコア降順、2nd: 年齢昇順）
+students = [("Alice", 90, 20), ("Bob", 85, 22), ("Carol", 90, 19)]
+students.sort(key=lambda x: (-x[1], x[2]))
+print(students)
+# [('Carol', 90, 19), ('Alice', 90, 20), ('Bob', 85, 22)]
+
+# 絶対値でソート
+arr2 = [-5, 3, -1, 4, -2]
+print(sorted(arr2, key=abs))   # [-1, -2, 3, 4, -5]
+
+# 文字列を長さでソート
+words = ["banana", "apple", "cherry", "fig"]
+print(sorted(words, key=len))  # ['fig', 'apple', 'banana', 'cherry']
+""",
+            language="python",
+        )
+        st.success("応用: 辞書順・複合条件ランキング・座標圧縮")
+
+    with st.expander("🔍 めぐる式二分探索"):
+        st.info("「条件を満たす最小/最大値」を O(log N) で求める。単調性があれば何でも使える。")
+        st.code(
+            """\
+# ok(m) が False→...→True→... の単調性を持つとき「True になる最小の m」を探す
+def ok(m: int) -> bool:
+    return m * m >= 10   # 例: m^2 >= 10 を満たす最小整数
+
+lo, hi = 0, 10**9
+while lo + 1 < hi:
+    mid = (lo + hi) // 2
+    if ok(mid):
+        hi = mid
+    else:
+        lo = mid
+print(hi)   # 4  (4^2=16>=10, 3^2=9<10)
+
+# 「True になる最大の m」を探す場合（逆向き）
+def ok2(m: int) -> bool:
+    return m * m <= 10
+
+lo2, hi2 = 0, 10**9
+while lo2 + 1 < hi2:
+    mid = (lo2 + hi2) // 2
+    if ok2(mid):
+        lo2 = mid
+    else:
+        hi2 = mid
+print(lo2)   # 3  (3^2=9<=10, 4^2=16>10)
+""",
+            language="python",
+        )
+        st.success("応用: 最小化・最大化・巡回セールスマン緩和・木の直径")
+
 # ============================================================
 # Tab 4: リンク集
 # ============================================================
