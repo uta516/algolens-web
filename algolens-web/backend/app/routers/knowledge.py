@@ -1,9 +1,10 @@
-"""AI ナレッジベース: C問題パターン分析 & Weekly Insights."""
+"""AI ナレッジベース: C問題パターン分析 & Weekly Insights & マイスニペット."""
 
 import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 JST = timezone(timedelta(hours=9))
 
@@ -15,7 +16,7 @@ from app.core.database import get_db
 from app.models.problem import Problem
 from app.models.submission import Submission
 from app.models.user import User
-from app.schemas.knowledge import PatternAnalysis, ProblemSummary, StudyGuide, WeeklyInsights
+from app.schemas.knowledge import PatternAnalysis, ProblemSummary, Snippet, SnippetCreate, SnippetUpdate, StudyGuide, WeeklyInsights
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -318,6 +319,101 @@ AtCoder ユーザー「{username}」の直近の提出データ（{total}件、A
     _set_cached(cache_key, result)
     return result
 
+
+# ---------------------------------------------------------------------------
+# スニペット CRUD
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid
+
+_SNIPPETS_FILE = Path(__file__).parent.parent.parent / "data" / "snippets.json"
+
+
+def _load_snippets() -> list[dict]:
+    if not _SNIPPETS_FILE.exists():
+        return []
+    with open(_SNIPPETS_FILE, encoding="utf-8") as f:
+        data = json.load(f)
+
+    dirty = False
+    for s in data:
+        # 整数IDやショートIDをUUIDに移行
+        if not isinstance(s.get("id"), str) or len(s.get("id", "")) < 8:
+            s["id"] = str(_uuid.uuid4())
+            dirty = True
+        if "category" not in s:
+            s["category"] = "my_snippet"
+            dirty = True
+        for field in ("tags", "code", "memo"):
+            if field not in s:
+                s[field] = ""
+                dirty = True
+
+    if dirty:
+        _save_snippets(data)
+
+    return data
+
+
+def _save_snippets(snippets: list[dict]) -> None:
+    _SNIPPETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_SNIPPETS_FILE, "w", encoding="utf-8") as f:
+        json.dump(snippets, f, ensure_ascii=False, indent=2)
+
+
+@router.get("/snippets", response_model=list[Snippet])
+def list_snippets(category: str | None = None):
+    """保存済みスニペットを返す。category クエリパラメータで絞り込み可能。"""
+    snippets = _load_snippets()
+    if category:
+        snippets = [s for s in snippets if s.get("category") == category]
+    return snippets
+
+
+@router.post("/snippets", response_model=Snippet, status_code=201)
+def add_snippet(body: SnippetCreate):
+    """新しいスニペットを追加する。"""
+    snippets = _load_snippets()
+    entry = {
+        "id": str(_uuid.uuid4()),
+        "title": body.title,
+        "tags": body.tags,
+        "code": body.code,
+        "memo": body.memo,
+        "category": body.category,
+        "created_at": datetime.now(JST).isoformat(),
+    }
+    snippets.append(entry)
+    _save_snippets(snippets)
+    return entry
+
+
+@router.put("/snippets/{snippet_id}", response_model=Snippet)
+def update_snippet(snippet_id: str, body: SnippetUpdate):
+    """IDを指定してスニペットを上書き更新する。"""
+    snippets = _load_snippets()
+    for i, s in enumerate(snippets):
+        if s["id"] == snippet_id:
+            snippets[i].update({
+                "title": body.title,
+                "tags": body.tags,
+                "code": body.code,
+                "memo": body.memo,
+                "category": body.category,
+            })
+            _save_snippets(snippets)
+            return snippets[i]
+    raise HTTPException(status_code=404, detail="Snippet not found")
+
+
+@router.delete("/snippets/{snippet_id}", status_code=204)
+def delete_snippet(snippet_id: str):
+    """IDを指定してスニペットを削除する。"""
+    snippets = _load_snippets()
+    new_snippets = [s for s in snippets if s["id"] != snippet_id]
+    if len(new_snippets) == len(snippets):
+        raise HTTPException(status_code=404, detail="Snippet not found")
+    _save_snippets(new_snippets)
 
 # ---------------------------------------------------------------------------
 # GET /knowledge/study_guide/{username}

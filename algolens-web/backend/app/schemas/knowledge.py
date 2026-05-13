@@ -1,6 +1,27 @@
 from pydantic import BaseModel
 
 
+class SnippetCreate(BaseModel):
+    title: str
+    tags: str = ""
+    code: str = ""
+    memo: str = ""
+    category: str = "my_snippet"
+
+
+class SnippetUpdate(BaseModel):
+    title: str
+    tags: str = ""
+    code: str = ""
+    memo: str = ""
+    category: str = "my_snippet"
+
+
+class Snippet(SnippetCreate):
+    id: str  # UUID
+    created_at: str
+
+
 class ProblemSummary(BaseModel):
     title: str
     difficulty: float | None

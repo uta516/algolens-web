@@ -1,0 +1,11 @@
+[
+  {
+    "id": "90781970-3b2a-4475-a342-3eabe5373d24",
+    "title": "尺取り法",
+    "tags": "尺取り",
+    "code": "# 入力例: 配列aと条件k\nn, k = map(int, input().split())\na = list(map(int, input().split()))\n\n# 初期化\nleft = 0\ncurrent_sum = 0\nmax_length = 0\n\n# 尺取り法の実装\nfor right in range(n):\ncurrent_sum += a[right] # 右端を広げる\n\n# 条件を満たさない場合、左端を縮める\nwhile current_sum > k:\ncurrent_sum -= a[left]\nleft += 1\n\n# 条件を満たす区間の長さを更新\nmax_length = max(max_length, right - left + 1)\n\nprint(max_length) # 結果出力",
+    "memo": "",
+    "created_at": "2026-05-13T11:27:10.272791+09:00",
+    "category": "my_snippet"
+  }
+]

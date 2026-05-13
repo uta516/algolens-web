@@ -278,6 +278,66 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 
 ---
 
+### 2026-05-13 — Knowledge Base 全面強化（スニペット CRUD・典型アルゴリズム12本・タブ再編）
+
+#### ✅ 実装内容
+
+**1. マイ・スニペット機能の新設（`2_Knowledge_Base.py` + FastAPI）**
+
+- `backend/data/snippets.json` を永続化ストアとして新設
+- `POST /knowledge/snippets`：スニペット追加エンドポイントを実装
+- `GET /knowledge/snippets`：保存済みスニペット一覧を返すエンドポイントを実装
+- Streamlit 側に「マイ・スニペット」タブを追加。タイトル・タグ・コード・メモの入力フォームから FastAPI 経由で JSON に保存する UI を実装
+
+**2. スニペット CRUD の完全化（編集・削除・UUID・カテゴリ対応）**
+
+- スニペット ID を整数連番 → UUID 文字列に変更。既存データはロード時に自動マイグレーション
+- `category` フィールドを追加し `"my_snippet"` / `"input_cheatsheet"` で分類
+- `PUT /knowledge/snippets/{id}`：ID 指定による上書き更新エンドポイントを追加
+- `DELETE /knowledge/snippets/{id}`：ID 指定による削除エンドポイントを追加
+- `GET /knowledge/snippets?category=xxx`：カテゴリフィルタリングに対応
+- `SnippetUpdate` Pydantic モデルを `schemas/knowledge.py` に追加
+- Streamlit 側に `render_snippet_card()` 関数を実装。各スニペットに「✏️ 編集」（既存値をプリセットしたフォーム表示）と「🗑️ 削除」ボタンを追加。ボタンキーは `edit_btn_{uuid}` 形式で衝突なし
+- 「入力チートシート」タブの下部に「マイ・入力チートシート」セクションを追加し、同様の CRUD UI を配置
+
+**3. 典型アルゴリズムタブの完全書き換え（12本）**
+
+`frontend/pages/2_Knowledge_Base.py` の Tab 3 を以下4カテゴリ・12アルゴリズムで再構成：
+
+| カテゴリ | アルゴリズム |
+|---|---|
+| N ≦ 20〜50 | bit全探索・bit DP（集合DP/TSP）・Floyd-Warshall |
+| N ≦ 2,000 | 二重ループDP（部分和・ナップサック）・ソート（バブル/転倒数含む） |
+| N ≦ 10⁵〜10⁶ | 二分探索・累積和/いもす法・尺取り法・貪欲法・BIT（Fenwick Tree） |
+| 数学・巨大な制約 | 繰り返し二乗法（`pow(a,n,mod)` + 手書き実装 + nCr）・約数列挙/素因数分解/素数篩 |
+
+各スニペットは `st.info`（計算量・用途）・`st.markdown`（使い分け表・手順）・`st.code`（Pythonテンプレート）・`st.success`（応用例）で統一フォーマット化。変数名に予約語 `list` は一切不使用（`arr`/`A` に統一）
+
+**4. タブ順序の再編**
+
+- 最終的なタブ順：解法チートシート → 入力チートシート → **典型アルゴリズム** → **マイ・スニペット** → リンク集
+
+#### 🐛 発生したエラーと原因・解決策
+
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| スニペットセクションが `study_guide` の前に誤挿入された | `Edit` ツールの `replace_all=false` が `_set_cached(cache_key, result)\n    return result` の最初のマッチ（weekly insights の末尾）を置換した | 機能上は問題なし（FastAPI はルート登録順に依存しない）。以降は一意なコンテキストを含むターゲット文字列を使用 |
+| スニペットファイルパスのシミュレーションが不一致 | 相対パスで `Path('backend/app/routers')` を計算し、`__file__` の絶対パスと混同した | `Path(__file__).resolve()` を用いた絶対パスでシミュレーションし、`backend/data/snippets.json` へ正しく解決することを確認 |
+
+#### 🔧 技術的なポイント
+
+- Streamlit のタブ `with tab:` ブロックはソース内の記述順ではなく変数（`tab3` 等）で描画位置が決まるため、タブ順変更はラベルと変数の対応を変えるだけでよい
+- `render_snippet_card()` 内で `st.session_state[f"editing_{uuid}"]` を使うことで、各スニペットの編集モードを独立管理。`st.expander(expanded=is_editing)` により `st.rerun()` 後もフォームが展開状態を維持
+- スニペットの UUID マイグレーションは `_load_snippets()` 内で `dirty` フラグを用いて一度だけ実行し、変更があれば即座に再保存することで整合性を保つ
+
+#### 🚀 次回の目標
+
+- スニペット機能の実運用テスト（追加・編集・削除のフロー通し確認）
+- 典型アルゴリズムの内容レビューと追加（グラフ系・文字列系など）
+- テストスイートへのスニペット API テスト追加
+
+---
+
 ### 2026-05-07 — Gemini モデル切り替え & AI プロンプト強化
 
 #### ✅ 実装内容
