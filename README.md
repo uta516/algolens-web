@@ -162,7 +162,7 @@ pytest --cov=app tests/
 ### 🛠 実装内容
 - `README.md` を新規作成。「概要 / 起動方法 / 機能一覧 / 開発ログ」のハイブリッド構成に再設計し、全 API エンドポイント一覧・現在の機能カテゴリ別リストを追加
 - 既存の開発ログ全エントリを `<details>/<summary>` アコーディオン形式に変換（内容は1文字も削除せず保持）
-- `algolens-web/CLAUDE.md` を新規作成。「作業終了」カスタムコマンドを手順1〜4で詳細定義（git diff 確認→README追記→push→完了報告）
+- `CLAUDE.md` を新規作成。「作業終了」カスタムコマンドを手順1〜4で詳細定義（git diff 確認→README追記→push→完了報告）
 - `frontend/pages/2_Knowledge_Base.py` の典型アルゴリズム Tab（12本全て）に「例題・入力例・出力例」を追加し、コードスニペットを具体的な入出力付きの実践形式にリファクタリング
 
 ### ⚠️ 発生したエラーと対策
@@ -176,60 +176,179 @@ pytest --cov=app tests/
 </details>
 
 <details>
-<summary>📅 2026-05-04: バックエンド基盤 &amp; テストスイートの構築</summary>
+<summary>📅 2026-05-13: Knowledge Base 全面強化（スニペット CRUD・典型アルゴリズム12本・タブ再編）</summary>
 
 ### 🛠 実装内容
 
-**1. プロジェクト基盤の整備**
+**1. マイ・スニペット機能の新設（`2_Knowledge_Base.py` + FastAPI）**
 
-- FastAPI アプリケーション（`app/main.py`）を初期化し、Streamlit フロントエンド（`localhost:8501`）向けに CORS ミドルウェアを設定
-- `pydantic-settings` を用いた環境設定管理（`.env` ファイル対応）を実装し、DB URL・APIキー・AtCoderアカウント情報を一元管理
+- `backend/data/snippets.json` を永続化ストアとして新設
+- `POST /knowledge/snippets`：スニペット追加エンドポイントを実装
+- `GET /knowledge/snippets`：保存済みスニペット一覧を返すエンドポイントを実装
+- Streamlit 側に「マイ・スニペット」タブを追加。タイトル・タグ・コード・メモの入力フォームから FastAPI 経由で JSON に保存する UI を実装
 
-**2. SQLAlchemy 2.0 ORM モデルの設計と実装**
+**2. スニペット CRUD の完全化（編集・削除・UUID・カテゴリ対応）**
 
-`Mapped` + `mapped_column` を使用した型安全な3モデルを実装：
+- スニペット ID を整数連番 → UUID 文字列に変更。既存データはロード時に自動マイグレーション
+- `category` フィールドを追加し `"my_snippet"` / `"input_cheatsheet"` で分類
+- `PUT /knowledge/snippets/{id}`：ID 指定による上書き更新エンドポイントを追加
+- `DELETE /knowledge/snippets/{id}`：ID 指定による削除エンドポイントを追加
+- `GET /knowledge/snippets?category=xxx`：カテゴリフィルタリングに対応
+- `SnippetUpdate` Pydantic モデルを `schemas/knowledge.py` に追加
+- Streamlit 側に `render_snippet_card()` 関数を実装。各スニペットに「✏️ 編集」（既存値をプリセットしたフォーム表示）と「🗑️ 削除」ボタンを追加。ボタンキーは `edit_btn_{uuid}` 形式で衝突なし
+- 「入力チートシート」タブの下部に「マイ・入力チートシート」セクションを追加し、同様の CRUD UI を配置
 
-- **`User`**: AtCoderユーザー名（ユニーク制約）、作成日時、提出データへのリレーション
-- **`Problem`**: 問題ID・コンテストID・難易度スコア・タグ（カンマ区切り）・URL
-- **`Submission`**: 提出ID・ユーザー/問題FK・ステータス（AC/WA/TLE/RE/CE/MLE）・実行時間・メモリ使用量・メモ欄
+**3. 典型アルゴリズムタブの完全書き換え（12本）**
 
-**3. REST API ルーターの実装（5ルーター）**
+`frontend/pages/2_Knowledge_Base.py` の Tab 3 を以下4カテゴリ・12アルゴリズムで再構成：
 
-- `users` / `problems` / `submissions`：標準的な CRUD + 重複登録時の 409 エラー返却
-- `analysis`：AtCoder Problems の難易度スコアを8色（灰・茶・緑・水・青・黄・橙・赤）にバケット分けし、タグ別 AC 率・難易度別 AC 率を集計して返す分析エンドポイント
-- `sync`：AtCoder からのデータ同期（スタブ実装）
+| カテゴリ | アルゴリズム |
+|---|---|
+| N ≦ 20〜50 | bit全探索・bit DP（集合DP/TSP）・Floyd-Warshall |
+| N ≦ 2,000 | 二重ループDP（部分和・ナップサック）・ソート（バブル/転倒数含む） |
+| N ≦ 10⁵〜10⁶ | 二分探索・累積和/いもす法・尺取り法・貪欲法・BIT（Fenwick Tree） |
+| 数学・巨大な制約 | 繰り返し二乗法（`pow(a,n,mod)` + 手書き実装 + nCr）・約数列挙/素因数分解/素数篩 |
 
-**4. Pydantic v2 スキーマの実装**
+各スニペットは `st.info`（計算量・用途）・`st.markdown`（使い分け表・手順）・`st.code`（Pythonテンプレート）・`st.success`（応用例）で統一フォーマット化。変数名に予約語 `list` は一切不使用（`arr`/`A` に統一）
 
-- `UserCreate` / `UserResponse`、`ProblemCreate` / `ProblemResponse`、`SubmissionCreate` / `SubmissionResponse`
-- `AnalysisSummary`（`TagStat` + `DifficultyBucket` のネスト構造）
+**4. タブ順序の再編**
 
-**5. Streamlit フロントエンドのナビゲーション画面**
+- 最終的なタブ順：解法チートシート → 入力チートシート → **典型アルゴリズム** → **マイ・スニペット** → リンク集
 
-Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期）への導線を持つトップページを実装
+### ⚠️ 発生したエラーと対策
 
-**6. pytest テストスイート（合計17テスト）**
-
-- `conftest.py`：テスト用インメモリ SQLite + `TestClient` のフィクスチャを定義
-- `test_users.py`（7テスト）：ユーザー登録・取得・重複チェック・404の正常系/異常系を網羅
-- `test_problems.py`（10テスト）：問題 CRUD・`contest_id` フィルター・ページネーション・オプションフィールドの null 許容を検証
-
-**7. 開発自動化ツール**
-
-- `sync.ps1`：作業内容を対話形式で入力し `docs/logs/YYYY-MM-DD.md` に記録したうえで GitHub へ自動プッシュするスクリプト
-- `CLAUDE.md`：AI 支援開発のガードレール（破壊的変更の事前確認・推測実装の禁止）を定義
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| スニペットセクションが `study_guide` の前に誤挿入された | `Edit` ツールの `replace_all=false` が `_set_cached(cache_key, result)\n    return result` の最初のマッチ（weekly insights の末尾）を置換した | 機能上は問題なし（FastAPI はルート登録順に依存しない）。以降は一意なコンテキストを含むターゲット文字列を使用 |
+| スニペットファイルパスのシミュレーションが不一致 | 相対パスで `Path('backend/app/routers')` を計算し、`__file__` の絶対パスと混同した | `Path(__file__).resolve()` を用いた絶対パスでシミュレーションし、`backend/data/snippets.json` へ正しく解決することを確認 |
 
 ### 💡 技術的なポイント
 
-- SQLAlchemy 2.0 の `Mapped` 型アノテーションにより、ORM モデルとPython型ヒントを統一し、IDE補完・mypy 検査の精度を向上
-- `analysis` エンドポイントでは Python の `dict` 集計パターンを採用し、N+1 クエリを回避するために JOIN で一括取得してからメモリ上で集計
-- テストはクラスベース構成で、各テストメソッドが独立したトランザクションロールバックにより完全に分離
+- Streamlit のタブ `with tab:` ブロックはソース内の記述順ではなく変数（`tab3` 等）で描画位置が決まるため、タブ順変更はラベルと変数の対応を変えるだけでよい
+- `render_snippet_card()` 内で `st.session_state[f"editing_{uuid}"]` を使うことで、各スニペットの編集モードを独立管理。`st.expander(expanded=is_editing)` により `st.rerun()` 後もフォームが展開状態を維持
+- スニペットの UUID マイグレーションは `_load_snippets()` 内で `dirty` フラグを用いて一度だけ実行し、変更があれば即座に再保存することで整合性を保つ
 
 ### 🚀 次回の目標
 
-- AtCoder スクレイピング / API 連携による提出データの自動取得（`sync` ルーターの実装）
-- Streamlit の Analysis・Problems ページの UI 実装（Plotly グラフ）
-- Alembic によるデータベースマイグレーション管理の導入
+- スニペット機能の実運用テスト（追加・編集・削除のフロー通し確認）
+- 典型アルゴリズムの内容レビューと追加（グラフ系・文字列系など）
+- テストスイートへのスニペット API テスト追加
+
+</details>
+
+<details>
+<summary>📅 2026-05-12: 起動スクリプトの英語化 &amp; バッチファイル追加</summary>
+
+### 🛠 実装内容
+
+**1. `start.ps1` — コメント・メッセージを英語化**
+
+- スクリプト内の日本語コメント（`# バックエンド` / `# フロントエンド` / `Write-Host "起動しました。"` 等）をすべて英語に統一
+- 国際化・チーム共有を意識した可読性向上
+
+**2. `algolens-web.bat` — ダブルクリック起動ショートカット新規追加**
+
+- `powershell -ExecutionPolicy Bypass -File .\start.ps1` を実行する Windows バッチファイルを新規作成
+- エクスプローラーからダブルクリックするだけでバックエンド・フロントエンドを同時起動できるように
+
+### 💡 技術的なポイント
+
+- `start.ps1` は LF → CRLF 自動変換の警告が出るため、今後 `.gitattributes` で `text=auto` または `eol=crlf` を明示的に指定することを検討
+
+### 🚀 次回の目標
+
+- `study_guide` エンドポイントの実データでの品質確認
+- `5_AI_Knowledge_Base.py` の UX 通し確認
+- `.gitattributes` による CRLF 設定の整備
+
+</details>
+
+<details>
+<summary>📅 2026-05-07 (2): JST 対応・AI 学習方針エンドポイント新設・スニペット集拡充</summary>
+
+### 🛠 実装内容
+
+**1. 全体の時刻表示を UTC → JST に統一**
+
+- `backend/app/routers/knowledge.py`：`JST = timezone(timedelta(hours=9))` を定義し、`datetime.now(timezone.utc)` を `datetime.now(JST)` に置換（`generated_at` フィールド 2 箇所）
+- `frontend/pages/5_AI_Knowledge_Base.py`：生成日時の末尾ラベルを `UTC` → `JST` に修正
+- `frontend/pages/1_Problems.py`：提出記録の時刻を `pd.to_datetime().dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")` で JST 変換してから表示
+
+**2. `GET /knowledge/study_guide/{username}` — AI 学習方針エンドポイント新設**
+
+- `backend/app/routers/knowledge.py`：ユーザーの C 問題提出履歴（直近 15 件）を取得し、WA/TLE 等の失敗パターンを Gemini で分析
+- 出力は3フィールド（`current_weakness` 弱点分析 / `required_code_pattern` 習得すべき解法＋サンプルコード / `recommended_practice` 具体的アクションプラン + 推奨過去問）
+- `backend/app/schemas/knowledge.py`：`StudyGuide` スキーマを追加
+- `frontend/pages/5_AI_Knowledge_Base.py`：セクション③「今後の学習方針 (Next Action Plan)」として3つのカードで結果を表示。再生成ボタン付き
+
+**3. Gemini JSON パース品質の強化**
+
+- Gemini API 呼び出しに `response_mime_type="application/json"` を追加
+- `_parse_json()` を多段フォールバック（① 直接 `json.loads` → ② マークダウンブロック除去 → ③ 正規表現で `{...}` 抽出）に強化し、パース失敗を大幅に削減
+
+**4. 典型アルゴリズム スニペット集の拡充**
+
+- `frontend/pages/2_Knowledge_Base.py`：グリッド BFS・ハッシュテーブル・貪欲法・ソート・めぐる式二分探索の5スニペットを新規追加
+- `frontend/pages/5_AI_Knowledge_Base.py`：セクション④「典型アルゴリズム スニペット集」として全7パターン（全探索・DP・グリッド BFS・ハッシュテーブル・貪欲法・ソート・二分探索）を `st.expander` で実装
+
+### ⚠️ 発生したエラーと対策
+
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| Gemini レスポンスが `{}` にパースされ空のフィールドが返る | `response_mime_type` 未設定時、Gemini がマークダウンコードブロックで JSON を包んで返すことがある | `response_mime_type="application/json"` を追加 ＋ `_parse_json()` を多段フォールバック化 |
+| 提出一覧の時刻が UTC のまま表示される | DB 保存値は UTC ナイーブ文字列だが、変換処理がなかった | `tz_localize("UTC").tz_convert("Asia/Tokyo")` でフロントエンド側で変換 |
+
+### 💡 技術的なポイント
+
+- `response_mime_type="application/json"` はほぼ純粋な JSON を返すが、完全保証ではないため多段フォールバックを残すことで信頼性を二重化
+- C 問題の WA/TLE 傾向を分析するプロンプトでは、過去問の URL を含む推奨問題を必ず出力させることで、フロントエンドで clickable なリンクとして表示可能にした
+
+### 🚀 次回の目標
+
+- `study_guide` エンドポイントの実データでの品質確認
+- `5_AI_Knowledge_Base.py` の3セクション一括表示の UX チェック
+
+</details>
+
+<details>
+<summary>📅 2026-05-07: Gemini モデル切り替え &amp; AI プロンプト強化</summary>
+
+### 🛠 実装内容
+
+**1. Gemini 使用モデルの切り替え（`knowledge.py`）**
+
+- `gemini-2.0-flash` → `gemini-2.0-flash-lite` に変更後も 429 が継続
+- `client.models.list()` で利用可能な全モデルを列挙し、`generate_content` 呼び出しを直接テスト
+- `gemini-2.0-flash` / `gemini-2.0-flash-lite` は両方ともデイリークォータ超過（RESOURCE_EXHAUSTED）
+- 唯一応答した **`gemini-2.5-flash-lite`** に変更（`_call_gemini` / `ping_gemini` の2箇所）
+
+**2. フロントエンドのエラー文言修正（`5_AI_Knowledge_Base.py`）**
+
+- 429 エラー時の案内文に `gemini-1.5-flash` というモデル名を直書きしていた箇所を削除
+- 「Gemini API の無料枠クォータを超過しています」という汎用表記に統一
+
+**3. AI プロンプトの実戦的な強化（`knowledge.py`）**
+
+- `constraints_tendency`：「傾向を説明」→「N ≦ 100 → O(N^3) の全探索」形式の具体的な目安を 5〜8 個の箇条書きで出力するよう変更
+- `solving_patterns`：「解法の定石を説明」→「キーワード → 解法」形式の紐付け（例：「最大値の最小化」→ 二分探索）を 5〜8 個の箇条書きで出力するよう変更
+- `reusable_snippets`：「使い回せるパターンを説明」→ `### 〇〇の典型` 見出し＋箇条書きの Notion チートシート形式（2〜3 パターン）で出力するよう変更
+
+### ⚠️ 発生したエラーと対策
+
+| エラー | 原因 | 解決策 |
+|--------|------|--------|
+| `gemini-2.0-flash-lite` でも 429 継続 | デイリークォータ（RPD）が複数モデルにまたがって枯渇していた | `client.models.list()` + 直接呼び出しテストで生きているモデルを特定し `gemini-2.5-flash-lite` に切り替え |
+| `start.ps1` が PowerShell ツールからエンコードエラー | スクリプト内の全角文字が `-NonInteractive` モードで解析エラーになる | スクリプトを経由せず各コマンドを直接インライン実行するワークアラウンドで対処 |
+
+### 💡 技術的なポイント
+
+- 429 の原因が RPM（毎分）ではなく RPD（1日）超過の場合、モデルを変えるだけでは解決しない。`client.models.list()` から候補を列挙し実際に呼んで確認するアプローチが確実
+- プロンプトに出力フォーマット（箇条書き・見出し）のサンプルを埋め込むことで、LLM の出力をフロントエンドがそのままマークダウンレンダリングできる形に固定できる
+
+### 🚀 次回の目標
+
+- 新しいプロンプトで生成された AI ナレッジの品質確認（制約目安・キーワード→解法の精度）
+- `gemini-2.5-flash-lite` のクォータ監視と、超過時の自動フォールバック実装の検討
 
 </details>
 
@@ -306,179 +425,60 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 </details>
 
 <details>
-<summary>📅 2026-05-07 (2): JST 対応・AI 学習方針エンドポイント新設・スニペット集拡充</summary>
+<summary>📅 2026-05-04: バックエンド基盤 &amp; テストスイートの構築</summary>
 
 ### 🛠 実装内容
 
-**1. 全体の時刻表示を UTC → JST に統一**
+**1. プロジェクト基盤の整備**
 
-- `backend/app/routers/knowledge.py`：`JST = timezone(timedelta(hours=9))` を定義し、`datetime.now(timezone.utc)` を `datetime.now(JST)` に置換（`generated_at` フィールド 2 箇所）
-- `frontend/pages/5_AI_Knowledge_Base.py`：生成日時の末尾ラベルを `UTC` → `JST` に修正
-- `frontend/pages/1_Problems.py`：提出記録の時刻を `pd.to_datetime().dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")` で JST 変換してから表示
+- FastAPI アプリケーション（`app/main.py`）を初期化し、Streamlit フロントエンド（`localhost:8501`）向けに CORS ミドルウェアを設定
+- `pydantic-settings` を用いた環境設定管理（`.env` ファイル対応）を実装し、DB URL・APIキー・AtCoderアカウント情報を一元管理
 
-**2. `GET /knowledge/study_guide/{username}` — AI 学習方針エンドポイント新設**
+**2. SQLAlchemy 2.0 ORM モデルの設計と実装**
 
-- `backend/app/routers/knowledge.py`：ユーザーの C 問題提出履歴（直近 15 件）を取得し、WA/TLE 等の失敗パターンを Gemini で分析
-- 出力は3フィールド（`current_weakness` 弱点分析 / `required_code_pattern` 習得すべき解法＋サンプルコード / `recommended_practice` 具体的アクションプラン + 推奨過去問）
-- `backend/app/schemas/knowledge.py`：`StudyGuide` スキーマを追加
-- `frontend/pages/5_AI_Knowledge_Base.py`：セクション③「今後の学習方針 (Next Action Plan)」として3つのカードで結果を表示。再生成ボタン付き
+`Mapped` + `mapped_column` を使用した型安全な3モデルを実装：
 
-**3. Gemini JSON パース品質の強化**
+- **`User`**: AtCoderユーザー名（ユニーク制約）、作成日時、提出データへのリレーション
+- **`Problem`**: 問題ID・コンテストID・難易度スコア・タグ（カンマ区切り）・URL
+- **`Submission`**: 提出ID・ユーザー/問題FK・ステータス（AC/WA/TLE/RE/CE/MLE）・実行時間・メモリ使用量・メモ欄
 
-- Gemini API 呼び出しに `response_mime_type="application/json"` を追加
-- `_parse_json()` を多段フォールバック（① 直接 `json.loads` → ② マークダウンブロック除去 → ③ 正規表現で `{...}` 抽出）に強化し、パース失敗を大幅に削減
+**3. REST API ルーターの実装（5ルーター）**
 
-**4. 典型アルゴリズム スニペット集の拡充**
+- `users` / `problems` / `submissions`：標準的な CRUD + 重複登録時の 409 エラー返却
+- `analysis`：AtCoder Problems の難易度スコアを8色（灰・茶・緑・水・青・黄・橙・赤）にバケット分けし、タグ別 AC 率・難易度別 AC 率を集計して返す分析エンドポイント
+- `sync`：AtCoder からのデータ同期（スタブ実装）
 
-- `frontend/pages/2_Knowledge_Base.py`：グリッド BFS・ハッシュテーブル・貪欲法・ソート・めぐる式二分探索の5スニペットを新規追加
-- `frontend/pages/5_AI_Knowledge_Base.py`：セクション④「典型アルゴリズム スニペット集」として全7パターン（全探索・DP・グリッド BFS・ハッシュテーブル・貪欲法・ソート・二分探索）を `st.expander` で実装
+**4. Pydantic v2 スキーマの実装**
 
-### ⚠️ 発生したエラーと対策
+- `UserCreate` / `UserResponse`、`ProblemCreate` / `ProblemResponse`、`SubmissionCreate` / `SubmissionResponse`
+- `AnalysisSummary`（`TagStat` + `DifficultyBucket` のネスト構造）
 
-| エラー | 原因 | 解決策 |
-|--------|------|--------|
-| Gemini レスポンスが `{}` にパースされ空のフィールドが返る | `response_mime_type` 未設定時、Gemini がマークダウンコードブロックで JSON を包んで返すことがある | `response_mime_type="application/json"` を追加 ＋ `_parse_json()` を多段フォールバック化 |
-| 提出一覧の時刻が UTC のまま表示される | DB 保存値は UTC ナイーブ文字列だが、変換処理がなかった | `tz_localize("UTC").tz_convert("Asia/Tokyo")` でフロントエンド側で変換 |
+**5. Streamlit フロントエンドのナビゲーション画面**
 
-### 💡 技術的なポイント
+Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期）への導線を持つトップページを実装
 
-- `response_mime_type="application/json"` はほぼ純粋な JSON を返すが、完全保証ではないため多段フォールバックを残すことで信頼性を二重化
-- C 問題の WA/TLE 傾向を分析するプロンプトでは、過去問の URL を含む推奨問題を必ず出力させることで、フロントエンドで clickable なリンクとして表示可能にした
+**6. pytest テストスイート（合計17テスト）**
 
-### 🚀 次回の目標
+- `conftest.py`：テスト用インメモリ SQLite + `TestClient` のフィクスチャを定義
+- `test_users.py`（7テスト）：ユーザー登録・取得・重複チェック・404の正常系/異常系を網羅
+- `test_problems.py`（10テスト）：問題 CRUD・`contest_id` フィルター・ページネーション・オプションフィールドの null 許容を検証
 
-- `study_guide` エンドポイントの実データでの品質確認
-- `5_AI_Knowledge_Base.py` の3セクション一括表示の UX チェック
+**7. 開発自動化ツール**
 
-</details>
-
-<details>
-<summary>📅 2026-05-12: 起動スクリプトの英語化 &amp; バッチファイル追加</summary>
-
-### 🛠 実装内容
-
-**1. `start.ps1` — コメント・メッセージを英語化**
-
-- スクリプト内の日本語コメント（`# バックエンド` / `# フロントエンド` / `Write-Host "起動しました。"` 等）をすべて英語に統一
-- 国際化・チーム共有を意識した可読性向上
-
-**2. `algolens-web.bat` — ダブルクリック起動ショートカット新規追加**
-
-- `powershell -ExecutionPolicy Bypass -File .\start.ps1` を実行する Windows バッチファイルを新規作成
-- エクスプローラーからダブルクリックするだけでバックエンド・フロントエンドを同時起動できるように
+- `sync.ps1`：作業内容を対話形式で入力し `docs/logs/YYYY-MM-DD.md` に記録したうえで GitHub へ自動プッシュするスクリプト
+- `CLAUDE.md`：AI 支援開発のガードレール（破壊的変更の事前確認・推測実装の禁止）を定義
 
 ### 💡 技術的なポイント
 
-- `start.ps1` は LF → CRLF 自動変換の警告が出るため、今後 `.gitattributes` で `text=auto` または `eol=crlf` を明示的に指定することを検討
+- SQLAlchemy 2.0 の `Mapped` 型アノテーションにより、ORM モデルとPython型ヒントを統一し、IDE補完・mypy 検査の精度を向上
+- `analysis` エンドポイントでは Python の `dict` 集計パターンを採用し、N+1 クエリを回避するために JOIN で一括取得してからメモリ上で集計
+- テストはクラスベース構成で、各テストメソッドが独立したトランザクションロールバックにより完全に分離
 
 ### 🚀 次回の目標
 
-- `study_guide` エンドポイントの実データでの品質確認
-- `5_AI_Knowledge_Base.py` の UX 通し確認
-- `.gitattributes` による CRLF 設定の整備
-
-</details>
-
-<details>
-<summary>📅 2026-05-13: Knowledge Base 全面強化（スニペット CRUD・典型アルゴリズム12本・タブ再編）</summary>
-
-### 🛠 実装内容
-
-**1. マイ・スニペット機能の新設（`2_Knowledge_Base.py` + FastAPI）**
-
-- `backend/data/snippets.json` を永続化ストアとして新設
-- `POST /knowledge/snippets`：スニペット追加エンドポイントを実装
-- `GET /knowledge/snippets`：保存済みスニペット一覧を返すエンドポイントを実装
-- Streamlit 側に「マイ・スニペット」タブを追加。タイトル・タグ・コード・メモの入力フォームから FastAPI 経由で JSON に保存する UI を実装
-
-**2. スニペット CRUD の完全化（編集・削除・UUID・カテゴリ対応）**
-
-- スニペット ID を整数連番 → UUID 文字列に変更。既存データはロード時に自動マイグレーション
-- `category` フィールドを追加し `"my_snippet"` / `"input_cheatsheet"` で分類
-- `PUT /knowledge/snippets/{id}`：ID 指定による上書き更新エンドポイントを追加
-- `DELETE /knowledge/snippets/{id}`：ID 指定による削除エンドポイントを追加
-- `GET /knowledge/snippets?category=xxx`：カテゴリフィルタリングに対応
-- `SnippetUpdate` Pydantic モデルを `schemas/knowledge.py` に追加
-- Streamlit 側に `render_snippet_card()` 関数を実装。各スニペットに「✏️ 編集」（既存値をプリセットしたフォーム表示）と「🗑️ 削除」ボタンを追加。ボタンキーは `edit_btn_{uuid}` 形式で衝突なし
-- 「入力チートシート」タブの下部に「マイ・入力チートシート」セクションを追加し、同様の CRUD UI を配置
-
-**3. 典型アルゴリズムタブの完全書き換え（12本）**
-
-`frontend/pages/2_Knowledge_Base.py` の Tab 3 を以下4カテゴリ・12アルゴリズムで再構成：
-
-| カテゴリ | アルゴリズム |
-|---|---|
-| N ≦ 20〜50 | bit全探索・bit DP（集合DP/TSP）・Floyd-Warshall |
-| N ≦ 2,000 | 二重ループDP（部分和・ナップサック）・ソート（バブル/転倒数含む） |
-| N ≦ 10⁵〜10⁶ | 二分探索・累積和/いもす法・尺取り法・貪欲法・BIT（Fenwick Tree） |
-| 数学・巨大な制約 | 繰り返し二乗法（`pow(a,n,mod)` + 手書き実装 + nCr）・約数列挙/素因数分解/素数篩 |
-
-各スニペットは `st.info`（計算量・用途）・`st.markdown`（使い分け表・手順）・`st.code`（Pythonテンプレート）・`st.success`（応用例）で統一フォーマット化。変数名に予約語 `list` は一切不使用（`arr`/`A` に統一）
-
-**4. タブ順序の再編**
-
-- 最終的なタブ順：解法チートシート → 入力チートシート → **典型アルゴリズム** → **マイ・スニペット** → リンク集
-
-### ⚠️ 発生したエラーと対策
-
-| エラー | 原因 | 解決策 |
-|--------|------|--------|
-| スニペットセクションが `study_guide` の前に誤挿入された | `Edit` ツールの `replace_all=false` が `_set_cached(cache_key, result)\n    return result` の最初のマッチ（weekly insights の末尾）を置換した | 機能上は問題なし（FastAPI はルート登録順に依存しない）。以降は一意なコンテキストを含むターゲット文字列を使用 |
-| スニペットファイルパスのシミュレーションが不一致 | 相対パスで `Path('backend/app/routers')` を計算し、`__file__` の絶対パスと混同した | `Path(__file__).resolve()` を用いた絶対パスでシミュレーションし、`backend/data/snippets.json` へ正しく解決することを確認 |
-
-### 💡 技術的なポイント
-
-- Streamlit のタブ `with tab:` ブロックはソース内の記述順ではなく変数（`tab3` 等）で描画位置が決まるため、タブ順変更はラベルと変数の対応を変えるだけでよい
-- `render_snippet_card()` 内で `st.session_state[f"editing_{uuid}"]` を使うことで、各スニペットの編集モードを独立管理。`st.expander(expanded=is_editing)` により `st.rerun()` 後もフォームが展開状態を維持
-- スニペットの UUID マイグレーションは `_load_snippets()` 内で `dirty` フラグを用いて一度だけ実行し、変更があれば即座に再保存することで整合性を保つ
-
-### 🚀 次回の目標
-
-- スニペット機能の実運用テスト（追加・編集・削除のフロー通し確認）
-- 典型アルゴリズムの内容レビューと追加（グラフ系・文字列系など）
-- テストスイートへのスニペット API テスト追加
-
-</details>
-
-<details>
-<summary>📅 2026-05-07: Gemini モデル切り替え &amp; AI プロンプト強化</summary>
-
-### 🛠 実装内容
-
-**1. Gemini 使用モデルの切り替え（`knowledge.py`）**
-
-- `gemini-2.0-flash` → `gemini-2.0-flash-lite` に変更後も 429 が継続
-- `client.models.list()` で利用可能な全モデルを列挙し、`generate_content` 呼び出しを直接テスト
-- `gemini-2.0-flash` / `gemini-2.0-flash-lite` は両方ともデイリークォータ超過（RESOURCE_EXHAUSTED）
-- 唯一応答した **`gemini-2.5-flash-lite`** に変更（`_call_gemini` / `ping_gemini` の2箇所）
-
-**2. フロントエンドのエラー文言修正（`5_AI_Knowledge_Base.py`）**
-
-- 429 エラー時の案内文に `gemini-1.5-flash` というモデル名を直書きしていた箇所を削除
-- 「Gemini API の無料枠クォータを超過しています」という汎用表記に統一
-
-**3. AI プロンプトの実戦的な強化（`knowledge.py`）**
-
-- `constraints_tendency`：「傾向を説明」→「N ≦ 100 → O(N^3) の全探索」形式の具体的な目安を 5〜8 個の箇条書きで出力するよう変更
-- `solving_patterns`：「解法の定石を説明」→「キーワード → 解法」形式の紐付け（例：「最大値の最小化」→ 二分探索）を 5〜8 個の箇条書きで出力するよう変更
-- `reusable_snippets`：「使い回せるパターンを説明」→ `### 〇〇の典型` 見出し＋箇条書きの Notion チートシート形式（2〜3 パターン）で出力するよう変更
-
-### ⚠️ 発生したエラーと対策
-
-| エラー | 原因 | 解決策 |
-|--------|------|--------|
-| `gemini-2.0-flash-lite` でも 429 継続 | デイリークォータ（RPD）が複数モデルにまたがって枯渇していた | `client.models.list()` + 直接呼び出しテストで生きているモデルを特定し `gemini-2.5-flash-lite` に切り替え |
-| `start.ps1` が PowerShell ツールからエンコードエラー | スクリプト内の全角文字が `-NonInteractive` モードで解析エラーになる | スクリプトを経由せず各コマンドを直接インライン実行するワークアラウンドで対処 |
-
-### 💡 技術的なポイント
-
-- 429 の原因が RPM（毎分）ではなく RPD（1日）超過の場合、モデルを変えるだけでは解決しない。`client.models.list()` から候補を列挙し実際に呼んで確認するアプローチが確実
-- プロンプトに出力フォーマット（箇条書き・見出し）のサンプルを埋め込むことで、LLM の出力をフロントエンドがそのままマークダウンレンダリングできる形に固定できる
-
-### 🚀 次回の目標
-
-- 新しいプロンプトで生成された AI ナレッジの品質確認（制約目安・キーワード→解法の精度）
-- `gemini-2.5-flash-lite` のクォータ監視と、超過時の自動フォールバック実装の検討
+- AtCoder スクレイピング / API 連携による提出データの自動取得（`sync` ルーターの実装）
+- Streamlit の Analysis・Problems ページの UI 実装（Plotly グラフ）
+- Alembic によるデータベースマイグレーション管理の導入
 
 </details>
 
