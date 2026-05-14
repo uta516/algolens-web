@@ -543,3 +543,21 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - 典型アルゴリズムのスニペットは「例題→入力例→出力例→コード」の順にすることで、問題を読んで即座に対応するパターン認識の練習として活用しやすい構成になる
 
 </details>
+
+<details>
+<summary>📅 2026-05-14 (2): 開発ログ並び順の変更 &amp; 作業終了ルーティンの更新</summary>
+
+### 🛠 実装内容
+- 両 `README.md`（`algolens-web/README.md` と リポジトリルートの `README.md`）の「📖 開発ログ」セクションを、前セッションで降順に並び替えた後、今セッションで**昇順（古い順・05-04 が先頭・05-14 が末尾）**に再変更した
+- `../CLAUDE.md` の【作業終了ルーティン】を更新：「開発ログセクションの**先頭**に追記」→「開発ログセクションの**一番下（最後尾）**に追記」に変更し、ログが時系列昇順で自然に積み上がる運用に統一
+- 前セッション末尾で失敗していた `git add README.md ../README.md` を正しいパスで再実行し、降順ソートのコミット（`ae0df64`）を完成させた
+
+### ⚠️ 発生したエラーと対策
+- `git add "algolens-web/README.md"` が `fatal: pathspec did not match any files` で失敗していた（前セッションの積み残し）。原因は作業ディレクトリが `algolens-web/` なのに `algolens-web/README.md` という二重パスを指定していたため。`git add README.md ../README.md` の形式に修正して解決
+- `print()` で絵文字を含む文字列を出力すると Windows の cp932 環境で `UnicodeEncodeError`。`sys.stdout` を `io.TextIOWrapper(encoding='utf-8')` でラップして解決
+
+### 💡 技術的ポイント
+- `git add` のパスは**現在の作業ディレクトリからの相対パス**で指定する必要がある。サブディレクトリで作業中に親ディレクトリのファイルを追加する場合は `../file` 形式を使う
+- Python スクリプトで日本語・絵文字を含む文字列を標準出力する場合、Windows 環境では `sys.stdout` のエンコーディングを明示的に UTF-8 に設定しないと cp932 エラーが発生する
+
+</details>
