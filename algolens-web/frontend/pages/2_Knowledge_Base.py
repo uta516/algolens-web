@@ -252,37 +252,36 @@ with tab3:
             "2^N 通りの「選ぶ / 選ばない」を全列挙する。  \n"
             "計算量 **O(2^N × N)**。N ≤ 20 が実用上の目安。"
         )
-        st.markdown("**基本形: 部分集合を列挙して和を求める**")
+        st.markdown("**【例題】** N個の整数からいくつか選んで、その和を S にすることができるか判定せよ。")
+        st.markdown("**【入力例】** `N=3, S=10, A=[4, 1, 6]`  \n**【出力例】** `Yes`（4+6=10）")
         st.code("""\
-N = 4
-arr = [1, 2, 3, 4]
+N = 3
+S = 10
+A = [4, 1, 6]
 
-for bit in range(1 << N):          # 0 から 2^N - 1 まで
-    selected = []
+ans = "No"
+for bit in range(1 << N):
     subset_sum = 0
     for i in range(N):
         if bit >> i & 1:           # i ビット目が立っているか
-            selected.append(arr[i])
-            subset_sum += arr[i]
-    print(f"選択: {selected}, 和: {subset_sum}")
+            subset_sum += A[i]
+    if subset_sum == S:
+        ans = "Yes"
+        break
+
+print(ans)   # Yes
 """, language="python")
         st.markdown("**応用: 全部分集合の合計の合計**")
-        st.markdown(
-            "問題: `[4, 10, 1]` の全部分集合それぞれの合計を、さらに全て足した和を求めよ。  \n"
-            "出力: `60`"
-        )
         st.code("""\
 arr = [4, 10, 1]
 
-def bit_total(arr):
-    total = 0
-    for bit in range(1 << len(arr)):
-        for i in range(len(arr)):
-            if bit & (1 << i):
-                total += arr[i]
-    return total
+total = 0
+for bit in range(1 << len(arr)):
+    for i in range(len(arr)):
+        if bit & (1 << i):
+            total += arr[i]
 
-print(bit_total(arr))   # 60
+print(total)   # 60
 """, language="python")
         st.success("応用: 部分和判定・最小コスト選択・スケジューリング")
 
@@ -291,17 +290,16 @@ print(bit_total(arr))   # 60
             "訪問済みの頂点集合を bit で管理する DP。  \n"
             "巡回セールスマン問題（TSP）が典型。計算量 **O(2^N × N²)**。"
         )
-        st.markdown("**巡回セールスマン問題（TSP）テンプレート**")
+        st.markdown("**【例題】** N都市をすべてちょうど1回ずつ訪問する最短経路の長さを求めよ（最短ハミルトン路）。")
+        st.markdown("**【入力例】** `N=3, dist=[[0,2,8],[2,0,3],[8,3,0]]`  \n**【出力例】** `5`（0→1→2: 2+3=5）")
         st.code("""\
-# N頂点を全て訪問して戻る最小コスト（TSP）
 INF = float('inf')
-N = 4
-# dist[i][j] = 頂点i→j のコスト（事前に設定）
-dist = [[INF] * N for _ in range(N)]
+N = 3
+dist = [[0, 2, 8], [2, 0, 3], [8, 3, 0]]
 
 # dp[bit][i] = 集合 bit を訪問済みで現在頂点 i にいるときの最小コスト
 dp = [[INF] * N for _ in range(1 << N)]
-dp[1][0] = 0    # 頂点0からスタート（bit=0001）
+dp[1][0] = 0    # 頂点0からスタート（bit=001）
 
 for bit in range(1 << N):
     for i in range(N):
@@ -315,9 +313,9 @@ for bit in range(1 << N):
             nbit = bit | (1 << j)
             dp[nbit][j] = min(dp[nbit][j], dp[bit][i] + dist[i][j])
 
-# 全頂点訪問後、頂点0に戻る最小コスト
-ans = min(dp[(1 << N) - 1][i] + dist[i][0] for i in range(N))
-print(ans)
+# 全都市訪問後の最小コスト（どの都市で終わってもよい）
+ans = min(dp[(1 << N) - 1])
+print(ans)   # 5
 """, language="python")
         st.markdown("**集合DPの思考手順**")
         st.markdown(
@@ -332,18 +330,20 @@ print(ans)
             "全頂点間の最短経路を **O(N³)** で求める。  \n"
             "N ≦ 400 程度で有効。負辺があっても動作するが、負閉路があると正しく動かない。"
         )
+        st.markdown("**【例題】** 全ての頂点対について、最短経路のコストを求めよ。")
+        st.markdown("**【入力例】** `N=3, 辺(0-1:2), (1-2:3)`  \n**【出力例】** `5`（0から2への最短距離）")
         st.markdown("**ポイント: 中継頂点 k のループが最外側でなければならない**")
         st.code("""\
 INF = float('inf')
-N = 4
-# dist[i][j] = i→j の辺のコスト（辺がなければ INF、自身は 0）
+N = 3
 dist = [[INF] * N for _ in range(N)]
 for i in range(N):
     dist[i][i] = 0
 
-edges = [(0, 1, 3), (0, 2, 8), (1, 2, 1), (2, 3, 2)]
+edges = [(0, 1, 2), (1, 2, 3)]
 for u, v, w in edges:
     dist[u][v] = w
+    dist[v][u] = w    # 無向グラフ
 
 # ── ワーシャルフロイド本体（k → i → j の順が必須）──
 for k in range(N):          # 中継頂点
@@ -352,8 +352,8 @@ for k in range(N):          # 中継頂点
             if dist[i][k] + dist[k][j] < dist[i][j]:
                 dist[i][j] = dist[i][k] + dist[k][j]
 
-# dist[i][j] が頂点i→j の最短距離
-print(dist[0][3])  # 6  (0→1→2→3 = 3+1+2)
+ans = dist[0][2]
+print(ans)   # 5  (0→1→2 = 2+3)
 """, language="python")
         st.success("応用: 全点間最短路・経路の存在確認・負閉路検出")
 
@@ -366,10 +366,25 @@ print(dist[0][3])  # 6  (0→1→2→3 = 3+1+2)
             "状態と遷移を持つ動的計画法。  \n"
             "部分和・01ナップサックが典型。計算量 **O(N × W)**。"
         )
+        st.markdown("**【例題】** N個の品物（重さW, 価値V）から、重さの合計が W_max 以下になるように選んだときの価値の最大値を求めよ（ナップサック問題）。")
+        st.markdown("**【入力例】** `W_max=10, Items=[(3,30),(4,50),(5,60)]`  \n**【出力例】** `110`（重さ4と5を選ぶ: 50+60=110）")
+        st.code("""\
+W_max = 10
+items = [(3, 30), (4, 50), (5, 60)]
+
+# dp[j] = 重量 j 以下で達成できる最大価値
+dp = [0] * (W_max + 1)
+for w_i, v_i in items:
+    for j in reversed(range(w_i, W_max + 1)):   # 後ろから更新（01ナップサック）
+        dp[j] = max(dp[j], dp[j - w_i] + v_i)
+
+ans = dp[W_max]
+print(ans)   # 110
+""", language="python")
         st.markdown("**部分和問題（合計がちょうど S になる組み合わせがあるか）**")
         st.code("""\
-N, S = map(int, input().split())
-A = list(map(int, input().split()))
+N, S = 3, 10
+A = [4, 1, 6]
 
 dp = [False] * (S + 1)
 dp[0] = True
@@ -379,21 +394,7 @@ for i in range(N):
         if dp[j] and j + A[i] <= S:
             dp[j + A[i]] = True
 
-print("Yes" if dp[S] else "No")
-""", language="python")
-        st.markdown("**01ナップサック問題（重量 W 以下で価値を最大化）**")
-        st.code("""\
-N, W = 4, 10
-w = [2, 3, 4, 5]
-v = [3, 4, 5, 6]
-
-# dp[j] = 重量 j 以下で達成できる最大価値
-dp = [0] * (W + 1)
-for i in range(N):
-    for j in reversed(range(w[i], W + 1)):  # 後ろから更新
-        dp[j] = max(dp[j], dp[j - w[i]] + v[i])
-
-print(dp[W])   # 最大価値
+print("Yes" if dp[S] else "No")   # Yes
 """, language="python")
         st.success("応用: コイン問題・LIS（最長増加部分列）・編集距離")
 
@@ -402,18 +403,16 @@ print(dp[W])   # 最大価値
             "実用では `sorted()` / `.sort()` (Timsort, **O(N log N)**) を使う。  \n"
             "バブルソートは **O(N²)** だが「転倒数」の概念理解に役立つ。"
         )
-        st.markdown("**組み込みソート（実践で使う形）**")
+        st.markdown("**【例題】** 学生のデータ（名前, 点数, 年齢）を、点数の降順、同点なら年齢の昇順に並べ替えよ。")
+        st.markdown("**【入力例】** `[('Alice', 90, 20), ('Bob', 85, 22), ('Carol', 90, 18)]`  \n**【出力例】** `[('Carol', 90, 18), ('Alice', 90, 20), ('Bob', 85, 22)]`")
         st.code("""\
-arr = [5, 3, 1, 4, 2]
-print(sorted(arr))               # [1, 2, 3, 4, 5] 昇順（元不変）
-print(sorted(arr, reverse=True)) # [5, 4, 3, 2, 1] 降順
+students = [("Alice", 90, 20), ("Bob", 85, 22), ("Carol", 90, 18)]
 
-arr.sort()   # 破壊的ソート（in-place）
+# 点数の降順、同点なら年齢の昇順
+students.sort(key=lambda x: (-x[1], x[2]))
 
-# 複数キーソート（スコア降順 → 名前昇順）
-students = [("Alice", 90), ("Bob", 85), ("Carol", 90)]
-students.sort(key=lambda x: (-x[1], x[0]))
-# → [('Alice', 90), ('Carol', 90), ('Bob', 85)]
+print(students)
+# [('Carol', 90, 18), ('Alice', 90, 20), ('Bob', 85, 22)]
 """, language="python")
         st.markdown("**バブルソートの概念コード（転倒数カウント付き）**")
         st.code("""\
@@ -441,6 +440,23 @@ print(inv_count)  # 転倒数
             "ソート済み配列内の検索 **O(log N)**。  \n"
             "「条件を満たす最小/最大値」もめぐる式二分探索で求められる。"
         )
+        st.markdown("**【例題】** 条件「x² ≥ 100」を満たす最小の整数 x を求めよ（めぐる式二分探索）。")
+        st.markdown("**【入力例】** `100`（目標値の二乗）  \n**【出力例】** `10`")
+        st.code("""\
+def ok(m: int) -> bool:
+    return m * m >= 100   # x^2 >= 100 を満たす最小の x を探す
+
+lo, hi = 0, 10**9
+while lo + 1 < hi:
+    mid = (lo + hi) // 2
+    if ok(mid):
+        hi = mid
+    else:
+        lo = mid
+
+ans = hi
+print(ans)   # 10  (10^2=100>=100, 9^2=81<100)
+""", language="python")
         st.markdown("**bisect_left / bisect_right の使い分け**")
         st.markdown(
             "| 条件 | 使う関数 |\n"
@@ -462,34 +478,6 @@ print(bisect.bisect_right(a, x))   # 3  (x より大きいが始まる最左)
 count = bisect.bisect_right(a, x) - bisect.bisect_left(a, x)
 print(count)   # 2
 """, language="python")
-        st.markdown("**めぐる式二分探索（「条件を満たす最小の x」を求める）**")
-        st.code("""\
-# ok(m) が False→...→True→... の単調性を持つとき「True になる最小 m」を探す
-def ok(m: int) -> bool:
-    return m * m >= 10   # 例: m^2 >= 10 を満たす最小整数
-
-lo, hi = 0, 10**9
-while lo + 1 < hi:
-    mid = (lo + hi) // 2
-    if ok(mid):
-        hi = mid
-    else:
-        lo = mid
-print(hi)   # 4  (4^2=16>=10, 3^2=9<10)
-
-# 「条件を満たす最大の m」を探すとき
-def ok2(m: int) -> bool:
-    return m * m <= 10
-
-lo2, hi2 = 0, 10**9
-while lo2 + 1 < hi2:
-    mid = (lo2 + hi2) // 2
-    if ok2(mid):
-        lo2 = mid
-    else:
-        hi2 = mid
-print(lo2)   # 3
-""", language="python")
         st.success("応用: 最小化・最大化・N番目の値の探索")
 
     with st.expander("➕ 7. 累積和 / いもす法"):
@@ -497,7 +485,24 @@ print(lo2)   # 3
             "区間和を **O(1)** で答える前処理 **O(N)**。  \n"
             "いもす法は「区間への加算クエリ」を O(N) で一括処理する。"
         )
-        st.markdown("**1次元累積和**")
+        st.markdown("**【例題】** N日間の来店予約がある。「L日目からR日目まで人数が増える」というクエリをQ回処理した後の、各日の来店者数を求めよ。")
+        st.markdown("**【入力例】** `N=5, クエリ: (1日目〜3日目に+1), (2日目〜4日目に+2)`  \n**【出力例】** `[0, 1, 3, 3, 2, 0]`（インデックス0は未使用、1〜5が各日）")
+        st.code("""\
+N = 5
+queries = [(1, 3, 1), (2, 4, 2)]   # (L, R, x): L日目からR日目まで +x
+
+imos = [0] * (N + 2)
+for l, r, x in queries:
+    imos[l] += x
+    imos[r + 1] -= x
+
+result = [0] * (N + 1)   # 1-indexed（result[i] が i 日目の来店者数）
+for i in range(1, N + 1):
+    result[i] = result[i - 1] + imos[i]
+
+print(result)   # [0, 1, 3, 3, 2, 0]
+""", language="python")
+        st.markdown("**1次元累積和（区間和クエリ）**")
         st.code("""\
 a = [3, 1, 4, 1, 5, 9, 2, 6]
 N = len(a)
@@ -512,27 +517,6 @@ def range_sum(l, r):
 
 print(range_sum(2, 5))   # a[2]+a[3]+a[4] = 4+1+5 = 10
 """, language="python")
-        st.markdown("**いもす法（区間 `[l, r]` に x を加算する操作を一括処理）**")
-        st.code("""\
-N = 10
-imos = [0] * (N + 1)
-
-# 区間 [l, r]（0-indexed 閉区間）に x を加算するマーク
-def add_range(l, r, x):
-    imos[l]     += x
-    imos[r + 1] -= x
-
-add_range(1, 3, 5)   # インデックス 1〜3 に +5
-add_range(2, 5, 3)   # インデックス 2〜5 に +3
-
-# 累積和を取って各インデックスの実際の値を確定
-result = [0] * N
-result[0] = imos[0]
-for i in range(1, N):
-    result[i] = result[i - 1] + imos[i]
-
-print(result)   # [0, 5, 8, 8, 3, 3, 0, 0, 0, 0]
-""", language="python")
         st.success("応用: 区間への一括加算・2次元いもす法・区間の重なり検出")
 
     with st.expander("🪟 8. 尺取り法（Two Pointers）"):
@@ -540,35 +524,12 @@ print(result)   # [0, 5, 8, 8, 3, 3, 0, 0, 0, 0]
             "右端ポインタを進めながら、条件を破ったら左端を縮める。  \n"
             "条件を満たす連続部分列の個数や最大長を **O(N)** で求める。"
         )
-        st.markdown("**基本テンプレート: 合計が K 以下の区間の個数を数える**")
+        st.markdown("**【例題】** 長さNの数列Aがある。連続する部分列の和が K 以下となるような部分列の最長の長さを求めよ。")
+        st.markdown("**【入力例】** `A=[1, 2, 3, 1, 2], K=4`  \n**【出力例】** `2`（例: [1,2] や [3,1]）")
         st.code("""\
-N = 5
 A = [1, 2, 3, 1, 2]
 K = 4
-
-right = 0
-total = 0
-ans = 0
-
-for left in range(N):
-    # right を進められるだけ進める
-    while right < N and total + A[right] <= K:
-        total += A[right]
-        right += 1
-    # [left, right) が条件を満たす → right - left 通り
-    ans += (right - left)
-    if right == left:
-        right += 1
-    else:
-        total -= A[left]
-
-print(ans)
-""", language="python")
-        st.markdown("**応用: 条件を満たす最長連続部分列の長さ**")
-        st.code("""\
-N = 6
-A = [1, 2, 1, 3, 1, 2]
-K = 5
+N = len(A)
 
 left = 0
 total = 0
@@ -581,7 +542,31 @@ for right in range(N):
         left += 1
     max_len = max(max_len, right - left + 1)
 
-print(max_len)
+ans = max_len
+print(ans)   # 2
+""", language="python")
+        st.markdown("**応用: 合計が K 以下の区間の個数を数える**")
+        st.code("""\
+A = [1, 2, 3, 1, 2]
+K = 4
+N = len(A)
+
+right = 0
+total = 0
+ans = 0
+
+for left in range(N):
+    while right < N and total + A[right] <= K:
+        total += A[right]
+        right += 1
+    # [left, right) が条件を満たす → right - left 通り
+    ans += (right - left)
+    if right == left:
+        right += 1
+    else:
+        total -= A[left]
+
+print(ans)
 """, language="python")
         st.success("応用: 最長部分列・合計が一定の区間カウント・スライディングウィンドウ")
 
@@ -590,10 +575,10 @@ print(max_len)
             "局所的に最善の選択を積み重ねることで全体最適を得る。  \n"
             "区間スケジューリングが典型例。"
         )
-        st.markdown("**区間スケジューリング（重ならない区間を最大数選ぶ）**")
+        st.markdown("**【例題】** N個の仕事（開始時間, 終了時間）がある。時間が重ならないように最大でいくつの仕事ができるか。")
+        st.markdown("**【入力例】** `[(1,4), (3,5), (0,6), (5,7)]`  \n**【出力例】** `2`（(1,4) と (5,7) を選ぶ）")
         st.code("""\
-# 各区間を (start, end) で表す
-intervals = [(1, 4), (3, 5), (0, 6), (5, 7), (3, 9), (5, 9), (6, 10), (8, 11)]
+intervals = [(1, 4), (3, 5), (0, 6), (5, 7)]
 
 # 終了時刻の早い順にソートして貪欲に選ぶ
 intervals.sort(key=lambda x: x[1])
@@ -605,7 +590,8 @@ for s, e in intervals:
         count += 1
         last_end = e
 
-print(count)   # 4
+ans = count
+print(ans)   # 2
 """, language="python")
         st.markdown("**コイン問題（最少枚数で両替）**")
         st.code("""\
@@ -624,6 +610,8 @@ print(result)   # [2, 2, 0, 3, 0, 4]  ← 各コインの枚数
             "一点更新と区間和取得をどちらも **O(log N)** で行うデータ構造。  \n"
             "BIT（Binary Indexed Tree）は実装が軽量で、転倒数・順位クエリに頻出。"
         )
+        st.markdown("**【例題】** 長さNの数列の「i番目にxを足す」「1番目からi番目までの和を求める」クエリを高速に処理せよ。")
+        st.markdown("**【入力例】** `A=[3,1,4,1,5,9,2,6]`、add(3, 10) 後に range_query(3, 6) を求めよ  \n**【出力例】** `29`（(4+10)+1+5+9=29）")
         st.markdown("**BIT (1-indexed) の実装**")
         st.code("""\
 class BIT:
@@ -632,13 +620,11 @@ class BIT:
         self.tree = [0] * (n + 1)
 
     def add(self, i, x):
-        \"\"\"i番目（1-indexed）に x を加算。\"\"\"
         while i <= self.n:
             self.tree[i] += x
             i += i & (-i)       # 最下位ビットだけ立てたもの
 
     def query(self, i):
-        \"\"\"1〜i の区間和を返す。\"\"\"
         s = 0
         while i > 0:
             s += self.tree[i]
@@ -646,18 +632,18 @@ class BIT:
         return s
 
     def range_query(self, l, r):
-        \"\"\"l〜r（1-indexed）の区間和を返す。\"\"\"
         return self.query(r) - self.query(l - 1)
 
 
-# 使用例
-bit = BIT(8)
-for i, x in enumerate([3, 1, 4, 1, 5, 9, 2, 6], start=1):
+A = [3, 1, 4, 1, 5, 9, 2, 6]
+bit = BIT(len(A))
+for i, x in enumerate(A, start=1):
     bit.add(i, x)
 
-print(bit.range_query(3, 6))  # 4+1+5+9 = 19
-bit.add(3, 10)                 # 3番目に 10 を加算
-print(bit.range_query(3, 6))  # 14+1+5+9 = 29
+print(bit.range_query(3, 6))   # 4+1+5+9 = 19
+bit.add(3, 10)                  # 3番目に 10 を加算
+ans = bit.range_query(3, 6)
+print(ans)                      # (4+10)+1+5+9 = 29
 """, language="python")
         st.success("応用: 転倒数カウント・動的な区間和・座標圧縮との組み合わせ")
 
@@ -670,11 +656,12 @@ print(bit.range_query(3, 6))  # 14+1+5+9 = 29
             "a^n mod m を **O(log n)** で計算する。  \n"
             "Python では組み込みの `pow(a, n, mod)` が最速で推奨。"
         )
-        st.markdown("**Python 組み込み（推奨）**")
+        st.markdown("**【例題】** a^n を mod M で割った余りを求めよ。")
+        st.markdown("**【入力例】** `a=2, n=100, M=10^9+7`  \n**【出力例】** `976371285`")
         st.code("""\
-# pow の第3引数に mod を渡すと繰り返し二乗法が内部で使われる
 a, n, mod = 2, 100, 10**9 + 7
-print(pow(a, n, mod))   # 2^100 mod (10^9+7) を O(log n) で計算
+ans = pow(a, n, mod)   # 組み込み関数で O(log n)
+print(ans)             # 976371285
 """, language="python")
         st.markdown("**手書き実装（仕組みの理解用）**")
         st.code("""\
@@ -688,7 +675,7 @@ def mod_pow(base: int, exp: int, mod: int) -> int:
         exp >>= 1               # exp を右に 1 ビットシフト
     return result
 
-print(mod_pow(2, 100, 10**9 + 7))  # pow(2, 100, 10**9+7) と同じ
+print(mod_pow(2, 100, 10**9 + 7))   # 976371285
 """, language="python")
         st.markdown("**よく使うパターン: 組み合わせ数 nCr mod p**")
         st.code("""\
@@ -715,23 +702,8 @@ print(comb(10, 3, MOD))   # 120
             "O(√N) で約数や素因数を列挙する。  \n"
             "N が 10^12 程度でも十分に高速。"
         )
-        st.markdown("**約数の全列挙 O(√N)**")
-        st.code("""\
-def get_divisors(N: int) -> list:
-    divisors = []
-    i = 1
-    while i * i <= N:
-        if N % i == 0:
-            divisors.append(i)
-            if i != N // i:
-                divisors.append(N // i)
-        i += 1
-    divisors.sort()
-    return divisors
-
-print(get_divisors(12))   # [1, 2, 3, 4, 6, 12]
-""", language="python")
-        st.markdown("**素因数分解 O(√N)**")
+        st.markdown("**【例題】** 整数 N の素因数分解を行い、それぞれの素因数とその個数を出力せよ。")
+        st.markdown("**【入力例】** `N=360`  \n**【出力例】** `[(2, 3), (3, 2), (5, 1)]`（2³ × 3² × 5 = 360）")
         st.code("""\
 def factorize(N: int) -> list:
     factors = []
@@ -748,11 +720,27 @@ def factorize(N: int) -> list:
         factors.append((N, 1))
     return factors
 
-print(factorize(360))   # [(2, 3), (3, 2), (5, 1)]  → 2³ × 3² × 5
+ans = factorize(360)
+print(ans)   # [(2, 3), (3, 2), (5, 1)]  → 2³ × 3² × 5
+""", language="python")
+        st.markdown("**約数の全列挙 O(√N)**")
+        st.code("""\
+def get_divisors(N: int) -> list:
+    divisors = []
+    i = 1
+    while i * i <= N:
+        if N % i == 0:
+            divisors.append(i)
+            if i != N // i:
+                divisors.append(N // i)
+        i += 1
+    divisors.sort()
+    return divisors
+
+print(get_divisors(12))   # [1, 2, 3, 4, 6, 12]
 """, language="python")
         st.markdown("**素数判定（O(√N)）と エラトステネスの篩（O(N log log N)）**")
         st.code("""\
-# 素数判定（1個）
 def is_prime(n: int) -> bool:
     if n < 2:
         return False
@@ -763,7 +751,6 @@ def is_prime(n: int) -> bool:
         i += 1
     return True
 
-# エラトステネスの篩（N以下の全素数を列挙）
 def sieve(N: int) -> list:
     is_p = [True] * (N + 1)
     is_p[0] = is_p[1] = False
