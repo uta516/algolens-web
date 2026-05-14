@@ -2,17 +2,22 @@
 
 > AtCoder の提出データを可視化・分析し、弱点特定と学習最適化を支援する Web アプリケーション
 
-## 技術スタック
+---
+
+## 🚀 AlgoLens 概要
+
+### 技術スタック
 
 | レイヤー | 技術 |
 |----------|------|
 | Backend | Python 3 / FastAPI 0.115 / SQLAlchemy 2.0 / Pydantic 2 |
 | Frontend | Streamlit 1.41 / Plotly 5 |
 | Database | SQLite（開発）/ Alembic（マイグレーション対応） |
+| AI | Google Gemini API (`gemini-2.5-flash-lite`) |
 | Testing | pytest 8.3 / pytest-cov |
 | Scraping | httpx / BeautifulSoup4 |
 
-## アーキテクチャ
+### アーキテクチャ
 
 ```
 algolens-web/
@@ -22,29 +27,26 @@ algolens-web/
 │   │   ├── models/        # SQLAlchemy ORM モデル
 │   │   ├── schemas/       # Pydantic スキーマ（入出力バリデーション）
 │   │   ├── routers/       # FastAPI ルーター（エンドポイント定義）
-│   │   ├── services/      # ビジネスロジック層（予定）
-│   │   └── repositories/  # データアクセス層（予定）
+│   │   ├── services/      # ビジネスロジック層
+│   │   └── repositories/  # データアクセス層
+│   ├── data/
+│   │   └── snippets.json  # マイ・スニペット永続化ストア
 │   └── tests/             # pytest テストスイート
 └── frontend/
-    └── app.py             # Streamlit ダッシュボード
+    ├── pages/
+    │   ├── 1_Problems.py          # 提出一覧・JST時刻表示
+    │   ├── 2_Knowledge_Base.py    # 静的ナレッジベース（チートシート・スニペット）
+    │   ├── 3_Sync.py              # データ同期
+    │   ├── 4_Analysis.py          # 難易度分析グラフ
+    │   └── 5_AI_Knowledge_Base.py # AI ナレッジベース（Gemini連携）
+    └── app.py
 ```
 
-## API エンドポイント
+---
 
-| Method | Path | 説明 |
-|--------|------|------|
-| POST | `/users/` | ユーザー登録 |
-| GET | `/users/{username}` | ユーザー情報取得 |
-| POST | `/problems/` | 問題登録 |
-| GET | `/problems/` | 問題一覧（contest_id / limit フィルター対応） |
-| GET | `/problems/{id}` | 問題詳細取得 |
-| POST | `/submissions/` | 提出結果登録 |
-| GET | `/submissions/` | 提出一覧（user_id / problem_id / status フィルター対応） |
-| GET | `/submissions/{id}` | 提出詳細取得 |
-| GET | `/analysis/{username}` | 弱点分析サマリー取得 |
-| GET | `/health` | ヘルスチェック |
+## 💻 起動方法・使い方
 
-## セットアップ
+### セットアップ
 
 ```bash
 # 仮想環境の作成・有効化
@@ -57,7 +59,24 @@ pip install -r requirements.txt
 
 # 環境変数の設定
 cp .env.example .env
+# .env に GEMINI_API_KEY を設定
+```
 
+### 起動方法
+
+**方法 1: ダブルクリック（Windows）**
+
+`algolens-web.bat` をエクスプローラーからダブルクリックするだけでバックエンド・フロントエンドを同時起動。
+
+**方法 2: PowerShell スクリプト**
+
+```powershell
+.\start.ps1
+```
+
+**方法 3: 手動起動**
+
+```bash
 # バックエンドの起動
 cd backend
 uvicorn app.main:app --reload
@@ -67,20 +86,99 @@ cd frontend
 streamlit run app.py
 ```
 
-## テストの実行
+### テストの実行
 
 ```bash
 cd backend
 pytest --cov=app tests/
 ```
 
+### API エンドポイント一覧
+
+| Method | Path | 説明 |
+|--------|------|------|
+| POST | `/users/` | ユーザー登録 |
+| GET | `/users/{username}` | ユーザー情報取得 |
+| POST | `/problems/` | 問題登録 |
+| GET | `/problems/` | 問題一覧（contest_id / limit フィルター対応） |
+| GET | `/problems/{id}` | 問題詳細取得 |
+| POST | `/submissions/` | 提出結果登録 |
+| GET | `/submissions/` | 提出一覧（user_id / problem_id / status フィルター対応） |
+| GET | `/submissions/{id}` | 提出詳細取得 |
+| GET | `/analysis/{username}` | 難易度別・タグ別 AC 率分析 |
+| GET | `/knowledge/patterns` | Gemini による頻出パターン分析 |
+| GET | `/knowledge/weekly-insights/{username}` | 直近提出の Weekly Insights |
+| GET | `/knowledge/study_guide/{username}` | AI 学習方針・推奨過去問 |
+| GET | `/knowledge/snippets` | スニペット一覧（カテゴリフィルター対応） |
+| POST | `/knowledge/snippets` | スニペット追加 |
+| PUT | `/knowledge/snippets/{id}` | スニペット更新 |
+| DELETE | `/knowledge/snippets/{id}` | スニペット削除 |
+| GET | `/knowledge/ping` | Gemini API 疎通確認 |
+| GET | `/health` | ヘルスチェック |
+
 ---
 
-## 開発ログ
+## ✨ 現在の機能一覧
 
-### 2026-05-04 — バックエンド基盤 & テストスイートの構築
+### バックエンド (FastAPI)
 
-#### ✅ 実装内容
+- **ORM モデル**：`User` / `Problem` / `Submission` の3モデル（SQLAlchemy 2.0 `Mapped` 型）
+- **REST API**：ユーザー・問題・提出の CRUD + 重複登録時の 409 エラー返却
+- **難易度分析**：8色バケット（灰〜赤）による AC 率・問題数集計
+- **AI ナレッジ API**：Gemini 連携（パターン分析 / Weekly Insights / 学習方針）、インメモリキャッシュ（TTL 1時間）
+- **スニペット CRUD**：UUID 管理・カテゴリ分類・`snippets.json` 永続化
+- **データ同期**：AtCoder Problems API から8,500問超の一括 upsert スクリプト
+
+### フロントエンド (Streamlit)
+
+- **1_Problems**：提出一覧・JST 時刻表示・ステータスフィルター
+- **2_Knowledge_Base（静的ナレッジベース）**：
+  - 解法チートシート
+  - 入力チートシート
+  - 典型アルゴリズム 12本（bit全探索 / bit DP / Floyd-Warshall / DP / ソート / 二分探索 / 累積和 / いもす法 / 尺取り法 / 貪欲法 / BIT / 繰り返し二乗法 / 素数篩）
+  - マイ・スニペット（追加・編集・削除 UI）
+- **3_Sync**：ワンクリックデータ同期
+- **4_Analysis**：Plotly 難易度別グラフ（AtCoder 公式カラー対応）
+- **5_AI_Knowledge_Base**：
+  - パターン分析（Gemini）
+  - Weekly Insights
+  - 今後の学習方針（Next Action Plan）
+  - 典型アルゴリズム スニペット集（7パターン）
+
+### 開発・運用ツール
+
+- `algolens-web.bat`：ダブルクリック起動ショートカット（Windows）
+- `start.ps1`：バックエンド・フロントエンド同時起動スクリプト
+- `scripts/sync_atcoder_data.py`：AtCoder データ一括同期
+- `pytest` テストスイート：17テスト（ユーザー7 + 問題10）
+
+---
+
+## 📖 開発ログ（作業履歴）
+
+<details>
+<summary>📅 2026-05-14: README・CLAUDE.md 整備と典型アルゴリズム例題追加</summary>
+
+### 🛠 実装内容
+- `README.md` を新規作成。「概要 / 起動方法 / 機能一覧 / 開発ログ」のハイブリッド構成に再設計し、全 API エンドポイント一覧・現在の機能カテゴリ別リストを追加
+- 既存の開発ログ全エントリを `<details>/<summary>` アコーディオン形式に変換（内容は1文字も削除せず保持）
+- `algolens-web/CLAUDE.md` を新規作成。「作業終了」カスタムコマンドを手順1〜4で詳細定義（git diff 確認→README追記→push→完了報告）
+- `frontend/pages/2_Knowledge_Base.py` の典型アルゴリズム Tab（12本全て）に「例題・入力例・出力例」を追加し、コードスニペットを具体的な入出力付きの実践形式にリファクタリング
+
+### ⚠️ 発生したエラーと対策
+- 特になし
+
+### 💡 技術的ポイント
+- `<details>` の `<summary>` タグ内に `&`（アンパサンド）を含む場合、GitHub Markdown では `&amp;` にエスケープしないと表示が崩れるケースがあるため、該当箇所（「& テストスイート」等）をエスケープ済みで記述
+- `CLAUDE.md` をプロジェクトルートに配置することで Claude Code が自動読み込みし、次セッション以降もカスタムコマンドが有効になる
+- 典型アルゴリズムのスニペットは「例題→入力例→出力例→コード」の順にすることで、問題を読んで即座に対応するパターン認識の練習として活用しやすい構成になる
+
+</details>
+
+<details>
+<summary>📅 2026-05-04: バックエンド基盤 &amp; テストスイートの構築</summary>
+
+### 🛠 実装内容
 
 **1. プロジェクト基盤の整備**
 
@@ -121,23 +219,24 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - `sync.ps1`：作業内容を対話形式で入力し `docs/logs/YYYY-MM-DD.md` に記録したうえで GitHub へ自動プッシュするスクリプト
 - `CLAUDE.md`：AI 支援開発のガードレール（破壊的変更の事前確認・推測実装の禁止）を定義
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - SQLAlchemy 2.0 の `Mapped` 型アノテーションにより、ORM モデルとPython型ヒントを統一し、IDE補完・mypy 検査の精度を向上
 - `analysis` エンドポイントでは Python の `dict` 集計パターンを採用し、N+1 クエリを回避するために JOIN で一括取得してからメモリ上で集計
 - テストはクラスベース構成で、各テストメソッドが独立したトランザクションロールバックにより完全に分離
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - AtCoder スクレイピング / API 連携による提出データの自動取得（`sync` ルーターの実装）
 - Streamlit の Analysis・Problems ページの UI 実装（Plotly グラフ）
 - Alembic によるデータベースマイグレーション管理の導入
 
----
+</details>
 
-### 2026-05-05 — 難易度分析グラフ・AI ナレッジベース・データ同期の全面実装
+<details>
+<summary>📅 2026-05-05: 難易度分析グラフ・AI ナレッジベース・データ同期の全面実装</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. `services/atcoder.py` — 難易度データ取得サービス**
 
@@ -181,7 +280,7 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - `2_Knowledge_Base.py`（静的チートシート）を git 履歴から完全復元
 - AI版を `5_AI_Knowledge_Base.py` として独立配置、2 ページが共存
 
-#### 🐛 発生したエラーと原因・解決策
+### ⚠️ 発生したエラーと対策
 
 | エラー | 原因 | 解決策 |
 |--------|------|--------|
@@ -192,23 +291,24 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 | `2_Knowledge_Base.py` が重複削除 | AI版リネーム時に誤って静的ページを削除 | `git show HEAD:...` で完全復元 |
 | Streamlit リロードで古いデータが表示される | `@st.cache_data(ttl=60〜120)` がDB同期後も古いレスポンスを保持 | DB直結エンドポイントのキャッシュを削除。Gemini エンドポイントは TTL=3600 を維持 |
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - `google-genai` の `response.text` は安全フィルタ発動時に `None` を返すため、空チェックを必須化
 - Gemini のレスポンスは ` ```json ` ブロックで囲まれることがあるため `re.sub` で除去してから `json.loads`
 - API キーの形式検証（`AIza` プレフィックス + 39 文字）をクライアント初期化前に実施し、不正キーを早期に 503 で返す
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - `GEMINI_API_KEY` の有料プランへの移行または利用量管理
 - Analysis ページの Plotly グラフ動作確認（実データでの表示テスト）
 - Sync ページからのワンクリックデータ更新フローの完成
 
----
+</details>
 
-### 2026-05-07 (2) — JST 対応・AI 学習方針エンドポイント新設・スニペット集拡充
+<details>
+<summary>📅 2026-05-07 (2): JST 対応・AI 学習方針エンドポイント新設・スニペット集拡充</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. 全体の時刻表示を UTC → JST に統一**
 
@@ -233,28 +333,29 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - `frontend/pages/2_Knowledge_Base.py`：グリッド BFS・ハッシュテーブル・貪欲法・ソート・めぐる式二分探索の5スニペットを新規追加
 - `frontend/pages/5_AI_Knowledge_Base.py`：セクション④「典型アルゴリズム スニペット集」として全7パターン（全探索・DP・グリッド BFS・ハッシュテーブル・貪欲法・ソート・二分探索）を `st.expander` で実装
 
-#### 🐛 発生したエラーと原因・解決策
+### ⚠️ 発生したエラーと対策
 
 | エラー | 原因 | 解決策 |
 |--------|------|--------|
 | Gemini レスポンスが `{}` にパースされ空のフィールドが返る | `response_mime_type` 未設定時、Gemini がマークダウンコードブロックで JSON を包んで返すことがある | `response_mime_type="application/json"` を追加 ＋ `_parse_json()` を多段フォールバック化 |
 | 提出一覧の時刻が UTC のまま表示される | DB 保存値は UTC ナイーブ文字列だが、変換処理がなかった | `tz_localize("UTC").tz_convert("Asia/Tokyo")` でフロントエンド側で変換 |
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - `response_mime_type="application/json"` はほぼ純粋な JSON を返すが、完全保証ではないため多段フォールバックを残すことで信頼性を二重化
 - C 問題の WA/TLE 傾向を分析するプロンプトでは、過去問の URL を含む推奨問題を必ず出力させることで、フロントエンドで clickable なリンクとして表示可能にした
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - `study_guide` エンドポイントの実データでの品質確認
 - `5_AI_Knowledge_Base.py` の3セクション一括表示の UX チェック
 
----
+</details>
 
-### 2026-05-12 — 起動スクリプトの英語化 & バッチファイル追加
+<details>
+<summary>📅 2026-05-12: 起動スクリプトの英語化 &amp; バッチファイル追加</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. `start.ps1` — コメント・メッセージを英語化**
 
@@ -266,21 +367,22 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - `powershell -ExecutionPolicy Bypass -File .\start.ps1` を実行する Windows バッチファイルを新規作成
 - エクスプローラーからダブルクリックするだけでバックエンド・フロントエンドを同時起動できるように
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - `start.ps1` は LF → CRLF 自動変換の警告が出るため、今後 `.gitattributes` で `text=auto` または `eol=crlf` を明示的に指定することを検討
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - `study_guide` エンドポイントの実データでの品質確認
 - `5_AI_Knowledge_Base.py` の UX 通し確認
 - `.gitattributes` による CRLF 設定の整備
 
----
+</details>
 
-### 2026-05-13 — Knowledge Base 全面強化（スニペット CRUD・典型アルゴリズム12本・タブ再編）
+<details>
+<summary>📅 2026-05-13: Knowledge Base 全面強化（スニペット CRUD・典型アルゴリズム12本・タブ再編）</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. マイ・スニペット機能の新設（`2_Knowledge_Base.py` + FastAPI）**
 
@@ -317,30 +419,31 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 
 - 最終的なタブ順：解法チートシート → 入力チートシート → **典型アルゴリズム** → **マイ・スニペット** → リンク集
 
-#### 🐛 発生したエラーと原因・解決策
+### ⚠️ 発生したエラーと対策
 
 | エラー | 原因 | 解決策 |
 |--------|------|--------|
 | スニペットセクションが `study_guide` の前に誤挿入された | `Edit` ツールの `replace_all=false` が `_set_cached(cache_key, result)\n    return result` の最初のマッチ（weekly insights の末尾）を置換した | 機能上は問題なし（FastAPI はルート登録順に依存しない）。以降は一意なコンテキストを含むターゲット文字列を使用 |
 | スニペットファイルパスのシミュレーションが不一致 | 相対パスで `Path('backend/app/routers')` を計算し、`__file__` の絶対パスと混同した | `Path(__file__).resolve()` を用いた絶対パスでシミュレーションし、`backend/data/snippets.json` へ正しく解決することを確認 |
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - Streamlit のタブ `with tab:` ブロックはソース内の記述順ではなく変数（`tab3` 等）で描画位置が決まるため、タブ順変更はラベルと変数の対応を変えるだけでよい
 - `render_snippet_card()` 内で `st.session_state[f"editing_{uuid}"]` を使うことで、各スニペットの編集モードを独立管理。`st.expander(expanded=is_editing)` により `st.rerun()` 後もフォームが展開状態を維持
 - スニペットの UUID マイグレーションは `_load_snippets()` 内で `dirty` フラグを用いて一度だけ実行し、変更があれば即座に再保存することで整合性を保つ
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - スニペット機能の実運用テスト（追加・編集・削除のフロー通し確認）
 - 典型アルゴリズムの内容レビューと追加（グラフ系・文字列系など）
 - テストスイートへのスニペット API テスト追加
 
----
+</details>
 
-### 2026-05-07 — Gemini モデル切り替え & AI プロンプト強化
+<details>
+<summary>📅 2026-05-07: Gemini モデル切り替え &amp; AI プロンプト強化</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. Gemini 使用モデルの切り替え（`knowledge.py`）**
 
@@ -360,28 +463,29 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 - `solving_patterns`：「解法の定石を説明」→「キーワード → 解法」形式の紐付け（例：「最大値の最小化」→ 二分探索）を 5〜8 個の箇条書きで出力するよう変更
 - `reusable_snippets`：「使い回せるパターンを説明」→ `### 〇〇の典型` 見出し＋箇条書きの Notion チートシート形式（2〜3 パターン）で出力するよう変更
 
-#### 🐛 発生したエラーと原因・解決策
+### ⚠️ 発生したエラーと対策
 
 | エラー | 原因 | 解決策 |
 |--------|------|--------|
 | `gemini-2.0-flash-lite` でも 429 継続 | デイリークォータ（RPD）が複数モデルにまたがって枯渇していた | `client.models.list()` + 直接呼び出しテストで生きているモデルを特定し `gemini-2.5-flash-lite` に切り替え |
 | `start.ps1` が PowerShell ツールからエンコードエラー | スクリプト内の全角文字が `-NonInteractive` モードで解析エラーになる | スクリプトを経由せず各コマンドを直接インライン実行するワークアラウンドで対処 |
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - 429 の原因が RPM（毎分）ではなく RPD（1日）超過の場合、モデルを変えるだけでは解決しない。`client.models.list()` から候補を列挙し実際に呼んで確認するアプローチが確実
 - プロンプトに出力フォーマット（箇条書き・見出し）のサンプルを埋め込むことで、LLM の出力をフロントエンドがそのままマークダウンレンダリングできる形に固定できる
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - 新しいプロンプトで生成された AI ナレッジの品質確認（制約目安・キーワード→解法の精度）
 - `gemini-2.5-flash-lite` のクォータ監視と、超過時の自動フォールバック実装の検討
 
----
+</details>
 
-### 2026-05-04 — ABC 自動レポートシステムの構築 & AI プロバイダー移行
+<details>
+<summary>📅 2026-05-04: ABC 自動レポートシステムの構築 &amp; AI プロバイダー移行</summary>
 
-#### ✅ 実装内容
+### 🛠 実装内容
 
 **1. AtCoder-MySolutions リポジトリの新規構築**
 
@@ -418,7 +522,7 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
   2. `README.md` 開発ログへ Markdown 形式で追記
   3. `git add .` → `git commit` → `git push origin main` を全自動実行
 
-#### 🐛 発生したエラーと原因・解決策
+### ⚠️ 発生したエラーと対策
 
 | エラー | 原因 | 解決策 |
 |-------|------|-------|
@@ -426,14 +530,16 @@ Analysis（弱点分析）・Problems（問題一覧）・Sync（データ同期
 | `git push` で `fatal: protocol '[https' is not supported` | リモート URL が `[https://github.com/]` という不正な形式で登録されていた | `git remote set-url origin https://github.com/uta516/algolens-web` で正しい URL に修正 |
 | AtCoder-MySolutions への初回プッシュ失敗 | GitHub 上にリポジトリが未作成だった | `github.com/new` でリポジトリ作成後に再プッシュ |
 
-#### 🔧 技術的なポイント
+### 💡 技術的なポイント
 
 - Gemini API はシステムプロンプトとユーザーメッセージを**シングルターンで結合**して送信（Claude の `system` / `messages` 分離構造とは異なる）
 - `git diff --staged --quiet || git commit` パターンにより、提出がない週の Actions で空コミットが発生しないよう制御
 - `--allow-unrelated-histories` による異なる git 系譜のマージはコンフリクトなしで完了（ファイル種別 `.txt` vs `.md/.py/.yml` が重複しなかったため）
 
-#### 🚀 次回の目標
+### 🚀 次回の目標
 
 - `GEMINI_API_KEY` を GitHub Secrets に登録して自動レポートを初稼働させる
 - Streamlit の Analysis・Sync ページ UI 実装（Plotly グラフ）
 - AlgoLens の `sync` ルーター：AtCoder スクレイピングによる提出データ自動取得
+
+</details>
