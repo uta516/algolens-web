@@ -83,9 +83,10 @@ def get_analysis(username: str, db: Session = Depends(get_db)):
     diff_map: dict[str, dict] = {name: {"total": 0, "ac": 0} for name in _BUCKET_ORDER}
     for sub, prob in subs:
         diff = prob.difficulty
-        if diff is None or diff < 0:
+        if diff is None:
             continue
-        bucket = _difficulty_to_color(diff)
+        # difficulty < 0 (A/B問題など) は 0 として灰バケットに含める
+        bucket = _difficulty_to_color(max(diff, 0))
         diff_map[bucket]["total"] += 1
         if sub.status == "AC":
             diff_map[bucket]["ac"] += 1
