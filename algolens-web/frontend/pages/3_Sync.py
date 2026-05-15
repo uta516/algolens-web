@@ -7,8 +7,8 @@ st.set_page_config(page_title="Sync | AlgoLens", page_icon="🔄", layout="wide"
 st.title("🔄 データ同期")
 st.caption("ユーザー登録と AtCoder Problems からのデータ取り込みを行います。")
 
-def api_post(path: str, json: dict | None = None) -> requests.Response:
-    return requests.post(f"{API_BASE}{path}", json=json, timeout=60)
+def api_post(path: str, json: dict | None = None, timeout: int = 60) -> requests.Response:
+    return requests.post(f"{API_BASE}{path}", json=json, timeout=timeout)
 
 st.header("1. ユーザー登録")
 with st.form("register_form"):
@@ -62,12 +62,18 @@ st.header("4. 提出データ同期")
 sync_username = st.text_input("同期するユーザー名", value=st.session_state.get("username", ""))
 if st.button("提出データを同期", type="primary"):
     if sync_username:
-        with st.spinner("取得中..."):
+        with st.spinner("全提出データを取得中...（提出数が多い場合は数分かかることがあります）"):
             try:
-                resp = api_post(f"/sync/submissions/{sync_username}")
+                resp = api_post(f"/sync/submissions/{sync_username}", timeout=300)
                 if resp.ok:
-                    st.success(f"✅ 提出データ同期完了！")
+                    result = resp.json()
+                    st.success(
+                        f"✅ 提出データ同期完了！"
+                        f"（新規登録: {result.get('inserted', '?')}件 / スキップ: {result.get('skipped', '?')}件）"
+                    )
                 else:
-                    st.error("同期失敗")
-            except:
-                st.error("接続エラー")
+                    st.error(f"同期失敗: {resp.text}")
+            except requests.exceptions.Timeout:
+                st.error("タイムアウトしました。バックエンドのログを確認してください。")
+            except Exception as e:
+                st.error(f"接続エラー: {e}")
