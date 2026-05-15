@@ -49,13 +49,6 @@ def get_analysis(username: str, db: Session = Depends(get_db)):
     ac_count = len(ac_subs)
     unique_ac = len({s.problem_id for s in ac_subs})
 
-    # --- DEBUG: APIから取得した直後のデータ数を出力 ---
-    diff_none_count = sum(1 for _, p in subs if p.difficulty is None)
-    diff_negative_count = sum(1 for _, p in subs if p.difficulty is not None and p.difficulty < 0)
-    print(f"[DEBUG][analysis/{username}] DB提出総数={total}, AC数={ac_count}, "
-          f"difficulty=None={diff_none_count}, difficulty<0={diff_negative_count}, "
-          f"difficulty有効={total - diff_none_count - diff_negative_count}")
-
     # タグ別集計
     tag_map: dict[str, dict] = {}
     for sub, prob in subs:
@@ -101,12 +94,6 @@ def get_analysis(username: str, db: Session = Depends(get_db)):
         for b in _BUCKET_ORDER
         if diff_map[b]["total"] > 0
     ]
-
-    # --- DEBUG: グラフに渡す直前の集計後データ数を出力 ---
-    print(f"[DEBUG][analysis/{username}] difficulty_stats={len(difficulty_stats)}バケット: "
-          f"{[f'{d.bucket}({d.total})' for d in difficulty_stats]}")
-    print(f"[DEBUG][analysis/{username}] tag_stats={len(tag_stats)}タグ: "
-          f"{[f'{t.tag}({t.total})' for t in tag_stats[:10]]}{'...' if len(tag_stats) > 10 else ''}")
 
     return AnalysisSummary(
         username=username,

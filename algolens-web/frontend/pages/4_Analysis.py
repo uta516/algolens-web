@@ -57,35 +57,6 @@ if data is None:
     st.stop()
 
 # ============================================================
-# DEBUG: APIレスポンスの生データ数を表示
-# ============================================================
-with st.expander("🐛 デバッグ情報（原因調査用）", expanded=True):
-    diff_stats_raw = data.get("difficulty_stats", [])
-    tag_stats_raw = data.get("tag_stats", [])
-
-    st.markdown("**① APIから取得した直後のデータ数**")
-    col_d1, col_d2, col_d3 = st.columns(3)
-    col_d1.metric("DB内 総提出数", data["total_submissions"])
-    col_d2.metric("difficulty_stats（全バケット数）", len(diff_stats_raw))
-    col_d3.metric("tag_stats（全タグ種類数）", len(tag_stats_raw))
-
-    st.markdown("**② difficulty_stats の内訳（グラフに渡す直前）**")
-    if diff_stats_raw:
-        import pandas as pd
-        df_debug_diff = pd.DataFrame(diff_stats_raw)
-        st.dataframe(df_debug_diff, use_container_width=True)
-    else:
-        st.warning("difficulty_stats が空です → 難易度データがDBに入っていない可能性があります。")
-
-    st.markdown("**③ tag_stats 上位10件（グラフに渡す直前）**")
-    if tag_stats_raw:
-        df_debug_tag = pd.DataFrame(tag_stats_raw[:10])
-        st.dataframe(df_debug_tag, use_container_width=True)
-        st.caption(f"tag_stats 全 {len(tag_stats_raw)} 件のうち上位10件を表示")
-    else:
-        st.warning("tag_stats が空です → タグデータがDBに入っていない可能性があります。")
-
-# ============================================================
 # サマリー指標
 # ============================================================
 col1, col2, col3 = st.columns(3)
