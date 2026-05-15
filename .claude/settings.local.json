@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(py *)",
+      "PowerShell(Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"Set-Location 'C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\backend'; uvicorn app.main:app --reload --port 8000\")",
+      "PowerShell(Set-ExecutionPolicy *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "PowerShell(Test-NetConnection *)",
+      "PowerShell(& \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\start.ps1\")",
+      "mcp__plugin_everything-claude-code_playwright__browser_navigate",
+      "PowerShell(& \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import plotly; print\\(plotly.__version__\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import google.generativeai; print\\(google.generativeai.__version__\\)\" 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\.venv\\\\Scripts\\\\pip.exe\" install google-generativeai --quiet 2>&1 | Select-Object -Last 5)",
+      "PowerShell($root = \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\"; $venv = \"$root\\\\.venv\\\\Scripts\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"Set-Location '$root\\\\backend'; & '$venv\\\\uvicorn.exe' app.main:app --reload --port 8000\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"Set-Location '$root\\\\frontend'; & '$venv\\\\streamlit.exe' run app.py --server.port 8501\"; Write-Host \"起動中... API: http://localhost:8000  Frontend: http://localhost:8501\")",
+      "PowerShell(Start-Process \"http://localhost:8501\")",
+      "PowerShell(Get-Process *)",
+      "PowerShell($root = \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\"; $venv = \"$root\\\\.venv\\\\Scripts\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"cd '$root\\\\backend'; & '$venv\\\\uvicorn.exe' app.main:app --reload --port 8000\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"cd '$root\\\\frontend'; & '$venv\\\\streamlit.exe' run app.py --server.port 8501\"; Write-Host \"起動しました。 API: http://localhost:8000/docs  Frontend: http://localhost:8501\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('backend/app/routers/knowledge.py'\\).read\\(\\)\\); print\\('knowledge.py OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('backend/app/schemas/knowledge.py'\\).read\\(\\)\\); print\\('schemas/knowledge.py OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('frontend/pages/5_AI_Knowledge_Base.py'\\).read\\(\\)\\); print\\('5_AI_Knowledge_Base.py OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "PowerShell($venv = \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\.venv\\\\Scripts\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"cd 'C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\backend'; & '$venv\\\\uvicorn.exe' app.main:app --reload --port 8000\"; Write-Host \"バックエンド起動中... http://localhost:8000/docs\")",
+      "PowerShell($venv = \"C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\.venv\\\\Scripts\"; Start-Process powershell -ArgumentList \"-NoExit\", \"-Command\", \"cd 'C:\\\\Users\\\\m2002\\\\OneDrive\\\\デスクトップ\\\\就活\\\\AtCorder\\\\algolens-web\\\\backend'; & '$venv\\\\uvicorn.exe' app.main:app --reload --port 8000\"; Write-Host \"起動: http://localhost:8000/docs\")",
+      "Bash(uvicorn app.main:app --reload)"
+    ]
+  }
+}
