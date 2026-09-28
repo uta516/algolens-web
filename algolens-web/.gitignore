@@ -32,3 +32,8 @@ backend/.coverage
 .coverage
 coverage.xml
 htmlcov/
+
+# RAG tutor (generated data)
+backend/data/chroma/
+backend/data/editorials/
+backend/data/algolens.db

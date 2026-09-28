@@ -27,6 +27,12 @@ pytest-cov==6.0.0
 # --- AI / LLM ---
 google-genai
 
+# --- RAG (公式解説ベクトルストア) ---
+# torch は容量削減のため CPU 版を先に入れる:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+chromadb==1.5.9
+sentence-transformers==6.1.0
+
 # --- Utils ---
 python-dotenv==1.0.1
 python-multipart==0.0.20

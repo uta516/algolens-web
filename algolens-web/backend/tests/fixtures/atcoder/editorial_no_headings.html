@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<!-- AtCoder 解説ページ（見出しなし・図と実装例あり）と同じ構造を持つテスト用の自作 HTML -->
+<html>
+<head><meta charset="utf-8"><title>Editorial</title></head>
+<body>
+<div id="main-container" class="container">
+<div class="row">
+<div class="col-sm-12">
+<span class="label label-default">Official</span>
+<h2 class="mt-1">C - Sample Sum Editorial by writer_a</h2>
+<hr class="mt-1"/>
+<div><p>この架空の問題は、盤面の模様を数える練習問題です。</p>
+<p>想定解では次の性質を使います。</p>
+<ul>
+<li>どの模様も、中心に大きさ <span>\(1\)</span> の小さな模様を含む。</li>
+<li>大きさ <span>\(1\)</span> の小さな模様は、模様の中心にしか現れない。</li>
+</ul>
+<p>ここで大きさ <span>\(1\)</span> の小さな模様とは、次の形のことです。</p>
+<pre class="prettyprint linenums">#.#
+.#.
+#.#
+</pre>
+<p>この形を探して、各模様の中心を見つけます。</p>
+<p><img src="https://img.atcoder.jp/example.png" alt=""></p>
+<p>各マスについて周囲 <span>\(4\)</span> マスを調べ、見つかった中心から外側へ伸ばして大きさを数えます。</p>
+<p>計算量は <span>\(\mathrm{O}(HW)\)</span> です。</p>
+<ul>
+<li>実装例(C++)</li>
+</ul>
+<pre class="prettyprint linenums">#include &lt;iostream&gt;
+#include &lt;vector&gt;
+using namespace std;
+
+int main() {
+  int h, w;
+  cin &gt;&gt; h &gt;&gt; w;
+  vector&lt;string&gt; s(h);
+  for (auto &amp;row : s) cin &gt;&gt; row;
+  cout &lt;&lt; 0 &lt;&lt; endl;
+}
+</pre>
+</div>
+<div class="clearfix">
+<p class="small gray pull-right">
+posted: <time class="timeago" datetime="2000/01/01 00:00:00"></time><br/>
+last update: <time class="timeago" datetime="2000/01/02 00:00:00"></time>
+</p>
+</div>
+</div>
+</div>
+</div>
+</body>
+</html>

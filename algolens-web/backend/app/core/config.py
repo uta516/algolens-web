@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     atcoder_username: str = ""
     atcoder_password: str = ""
+    # ChromaDB の保存先（未設定なら backend/data/chroma/）
+    chroma_dir: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
