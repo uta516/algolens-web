@@ -1,0 +1,35 @@
+{
+  // AtCorder フォルダを VS Code で開いたときに使えるタスク。
+  // Ctrl+Shift+B: 今開いている c.py / c.txt の問題のサンプルを試す
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AtCoder: サンプルを試す",
+      "type": "process",
+      "command": "${workspaceFolder}/algolens-web/.venv/Scripts/python.exe",
+      "args": ["${workspaceFolder}/algolens-web/backend/scripts/test.py", "--file", "${file}"],
+      "options": { "env": { "PYTHONIOENCODING": "utf-8" } },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true, "focus": false },
+      "problemMatcher": []
+    },
+    {
+      "label": "AtCoder: コンテストのファイルを作る",
+      "type": "process",
+      "command": "${workspaceFolder}/algolens-web/.venv/Scripts/python.exe",
+      "args": [
+        "${workspaceFolder}/algolens-web/backend/scripts/new_contest.py",
+        "${input:contestId}",
+        "--upto",
+        "${input:upto}"
+      ],
+      "options": { "env": { "PYTHONIOENCODING": "utf-8" } },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    { "id": "contestId", "type": "promptString", "description": "コンテストID（例: abc477）" },
+    { "id": "upto", "type": "promptString", "description": "どの問題まで作るか（例: d）", "default": "d" }
+  ]
+}

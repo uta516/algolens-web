@@ -173,7 +173,7 @@ def render_code_form(r: dict) -> None:
     """提出コードが手元のフォルダにない問題に、コードを貼り付けて処理する欄を出す。"""
     st.warning(
         "提出コードが手元のフォルダにありません。上の「提出」リンクを開いてコードをコピーし、"
-        "ここに貼り付けてください（または SUBMISSIONS_DIR に問題IDを含む名前で保存してから取り込み直す）。"
+        "ここに貼り付けてください（または submissions/<コンテスト>/<記号>.py に保存してから取り込み直す）。"
     )
     with st.form(f"code_form_{r['id']}"):
         code = st.text_area("提出コード（Python）", height=250, key=f"code_{r['id']}")

@@ -15,7 +15,6 @@
 
 import calendar
 import json
-import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -524,29 +523,6 @@ def _finish(db: Session, report: TutorReport, payload: dict, editorial_available
 # ---------------------------------------------------------------------------
 # 外部アクセスの本物の実装
 # ---------------------------------------------------------------------------
-
-CODE_EXTENSIONS = (".py", ".txt")
-
-
-def find_local_code(base_dir: Path | None, problem_id: str) -> str | None:
-    """手元のフォルダから、ファイル名に問題IDを含むコードを探して返す（なければ None）。
-
-    例: abc476_d.py / abc476_d_wa.py / 476/abc476_d.txt（サブフォルダも探す）。
-    "abc476_d" が "abc476_dx" などに誤って一致しないよう、前後が英数字でないものに限る。
-    複数あれば更新日時が最も新しいものを使う。
-    """
-    if base_dir is None or not base_dir.is_dir():
-        return None
-    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(problem_id.lower())}(?![a-z0-9])")
-    candidates = [
-        path for path in base_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in CODE_EXTENSIONS and pattern.search(path.stem.lower())
-    ]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda path: path.stat().st_mtime)
-    return newest.read_text(encoding="utf-8", errors="replace")
-
 
 def set_report_code(db: Session, report: TutorReport, code: str) -> TutorReport:
     """画面で貼り付けた提出コードを保存する。処理済みの行は変えない。"""

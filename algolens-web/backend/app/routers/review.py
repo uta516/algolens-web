@@ -3,6 +3,7 @@
 Streamlit から次の順に呼ぶ:
   GET  /review/contests?username=     取り込めるコンテスト（直近の ABC で提出があるもの）
   POST /review/import                  提出データを DB に同期し、最後の提出ごとに pending の行を作る
+                                       （コンテスト終了前は 403。AtCoder の生成 AI の利用ルールのため）
   POST /review/process/{report_id}     1 問処理して保存（これを pending の数だけ順番に呼ぶ）
                                        提出コードが手元にないときは 422 を返す
   PUT  /review/reports/{report_id}/code  画面で貼り付けた提出コードを保存する
@@ -13,14 +14,12 @@ import json
 import threading
 import time
 from functools import lru_cache
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.database import get_db
 from app.models.tutor_report import REPORT_DONE, TutorReport
 from app.routers.knowledge import _gemini_client
@@ -42,7 +41,6 @@ from app.services.review import (
     CodeRequired,
     ReviewDeps,
     ReviewError,
-    find_local_code,
     last_synced_epoch,
     latest_reports,
     plan_contest,
@@ -52,7 +50,15 @@ from app.services.review import (
     set_report_code,
     sync_user_submissions,
 )
+from app.services.contests import (
+    UNKNOWN_MESSAGE,
+    contest_end_epoch,
+    fetch_contests,
+    find_contest,
+    finished_error,
+)
 from app.services.tutor import TutorError
+from app.services.workspace import find_local_code, resolve_submissions_dir
 
 router = APIRouter(prefix="/review", tags=["review"])
 
@@ -72,18 +78,12 @@ def _cached(key: str, fetch):
     return value
 
 
-def _fetch_contests() -> list[dict]:
-    resp = httpx.get("https://kenkoooo.com/atcoder/resources/contests.json", timeout=60)
-    resp.raise_for_status()
-    return resp.json()
-
-
 def _recent_abc_contests(limit: int = _RECENT_CONTESTS) -> list[dict]:
     """終了済みの ABC を新しい順に limit 件。"""
     now = time.time()
     abcs = [
-        c for c in _cached("contests", _fetch_contests)
-        if c["id"].startswith("abc") and c["start_epoch_second"] + c.get("duration_second", 0) <= now
+        c for c in fetch_contests()
+        if c["id"].startswith("abc") and contest_end_epoch(c) <= now
     ]
     return sorted(abcs, key=lambda c: c["start_epoch_second"], reverse=True)[:limit]
 
@@ -103,9 +103,16 @@ def _atcoder_client() -> AtCoderClient:
     return AtCoderClient(interval=1.5)
 
 
-def _submissions_dir() -> Path | None:
-    value = settings.submissions_dir.strip()
-    return Path(value).expanduser() if value else None
+def _require_finished(contest_id: str) -> dict:
+    """コンテストが終了済みでなければ 403（AtCoder の生成 AI の利用ルールのため）。"""
+    try:
+        contest = find_contest(contest_id)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail=UNKNOWN_MESSAGE)
+    error = finished_error(contest)
+    if error:
+        raise HTTPException(status_code=403, detail=error)
+    return contest
 
 
 def _summary(r: TutorReport) -> ReportSummary:
@@ -140,9 +147,7 @@ def list_contests(username: str):
 @router.post("/import", response_model=ImportResponse)
 def import_contest(req: ImportRequest, db: Session = Depends(get_db)):
     """ユーザーの提出データを DB に同期してから、問題ごとの最後の提出について pending の行を作る。"""
-    contest = next((c for c in _cached("contests", _fetch_contests) if c["id"] == req.contest_id), None)
-    if contest is None:
-        raise HTTPException(status_code=404, detail=f"コンテスト {req.contest_id} が見つかりません")
+    contest = _require_finished(req.contest_id)
     # 同期の続き（前回の最新提出以降）とコンテストの開始のうち早い方から 1 回で取る
     from_second = min(last_synced_epoch(db, req.username), contest["start_epoch_second"])
     try:
@@ -165,6 +170,7 @@ def process_one(report_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="結果が見つかりません")
     if report.status == REPORT_DONE:
         return _summary(report)
+    _require_finished(report.contest_id)
     if not _process_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="別の問題を処理中です。終わるまで待ってください。")
     try:
@@ -180,7 +186,9 @@ def process_one(report_id: int, db: Session = Depends(get_db)):
             generate=generate,
             generate_first=generate_first,
             searcher=store,
-            find_code=lambda r: find_local_code(_submissions_dir(), r.problem_id),
+            find_code=lambda r: find_local_code(
+                resolve_submissions_dir(), r.contest_id, r.problem_index, r.problem_id
+            ),
             prepare_problem=lambda r: prepare_problem_data(client, r, index_editorials),
             body_text=get_problem_body_text,
         )

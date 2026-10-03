@@ -4,12 +4,14 @@ import logging
 import time
 from functools import lru_cache
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.routers.knowledge import _call_gemini, _gemini_client, _parse_json
 from app.schemas.tutor import ExplainRequest, ExplainResponse
+from app.services.contests import UNKNOWN_MESSAGE, find_contest, finished_error
 from app.services.editorial_chunker import get_problem_body_text
 from app.services.review import tutor_result_to_dict
 from app.services.tutor import Generate, TutorError, explain, load_problem
@@ -95,6 +97,14 @@ def explain_submission(req: ExplainRequest, db: Session = Depends(get_db)):
             detail=f"{req.problem_id} の問題データがありません。"
                    "scripts/build_editorial_index.py で取得済みの問題（ABC の C・D）を指定してください。",
         )
+
+    # AtCoder の生成 AI の利用ルールのため、コンテスト終了前は使わない
+    try:
+        error = finished_error(find_contest(problem.contest_id))
+    except httpx.HTTPError:
+        error = UNKNOWN_MESSAGE
+    if error:
+        raise HTTPException(status_code=403, detail=error)
 
     generate, generate_first = gemini_generators(_gemini_client())
     try:
