@@ -19,7 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -249,23 +249,36 @@ EXPLANATION_SCHEMA = {
 }
 
 
+def number_lines(code: str) -> str:
+    """プロンプト用に "  3| print(x)" の形で行番号を付ける。"""
+    lines = code.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    width = len(str(len(lines)))
+    return "\n".join(f"{i:>{width}}| {line}" for i, line in enumerate(lines, 1))
+
+
 def build_first_prompt(problem: ProblemData, code: str, verdict: str, feedback: str = "") -> str:
     retry = f"\n## 前回の修正案の問題点\n{feedback}\nこれを踏まえて修正し直してください。\n" if feedback else ""
     return f"""あなたは AtCoder の家庭教師です。生徒の Python 提出コードが {verdict} になりました。
-生徒のコードをできるだけ残したまま、AC するための最小限の修正を行ってください。
-全面的な書き直しは、元の方針では AC できない場合に限ります。
+生徒のコードを最小限だけ直して AC させてください。
+
+## 守ること（最重要）
+- 元のコードの構造・変数名・書き方をできるだけ残し、バグの原因の行だけを直す
+- 全体の書き直しは禁止。関数の分割・変数名の変更・処理の追加による整理もしない
+- 直す行が少ないほど良い修正とみなす
 
 ## 問題 ({problem.problem_id} {problem.title})
 {problem.statement}
 
-## 生徒のコード（判定: {verdict}）
-```python
-{code}
+## 生徒のコード（判定: {verdict}。各行の先頭は行番号）
+```
+{number_lines(code)}
 ```
 {retry}
 ## 出力（JSON）
-- fixed_code: 修正後の Python コード全体（標準入力から読み、標準出力に書く。コードブロック記号は付けない）
-- gap_summary: 生徒の考えと正解のずれを一文で
+- fixed_code: 修正後の Python コード全体（行番号とコードブロック記号は付けない）
+- gap_summary: 生徒の考えと正解のずれを一文で（直した行番号を含める）
 - mistake_type: 次から 1 つ: {", ".join(MISTAKE_TYPES)}
 - lesson: 次に同じミスをしないための教訓を一文で
 - correct_idea: この問題を解く正しい考え方を一文で（使う手法名があれば手法名を含める）
@@ -395,6 +408,18 @@ def _parse_first_pass(data: dict) -> dict | None:
     return {k: data[k].strip() for k in keys} | {"fixed_code": _strip_code_fence(data["fixed_code"])}
 
 
+TOO_LARGE_FEEDBACK = "変更が大きすぎる。元のコードを活かして必要な行だけ直して。"
+
+
+def _changed_lines(code: str, fixed_code: str) -> int:
+    return compute_diff(code, fixed_code)[1]
+
+
+def _is_small_fix(code: str, fixed_code: str) -> bool:
+    _, changed, total = compute_diff(code, fixed_code)
+    return classify_level(changed, total, samples_passed=True) == "書き方"
+
+
 def generate_fix(
     generate: Generate,
     problem: ProblemData,
@@ -402,22 +427,39 @@ def generate_fix(
     verdict: str,
     runner: Callable[[str, list[dict]], SampleCheck] = run_samples,
 ) -> FirstPass:
-    """LLM 1 回目 + サンプル確認。通らなければ最大 MAX_RETRIES 回やり直し、最後の案を返す。"""
+    """LLM 1 回目 + サンプル確認。
+
+    - サンプルを通らなければ最大 MAX_RETRIES 回やり直し、最後の案を返す
+    - サンプルは通ったが差分が「書き方」の基準を超えたら、1 回だけ小さく直すよう頼み直す。
+      やり直した案がサンプルを通り、かつ変更が小さくなった場合だけ差し替える
+    """
     feedback = ""
     last: FirstPass | None = None
-    for attempt in range(1, MAX_RETRIES + 2):
+    attempts = 0
+    for _ in range(MAX_RETRIES + 1):
+        attempts += 1
         parsed = _parse_first_pass(generate(build_first_prompt(problem, code, verdict, feedback), FIRST_PASS_SCHEMA))
         if parsed is None:
             feedback = "出力の JSON に必要な項目が欠けているか、mistake_type が選択肢にありませんでした。"
             continue
         check = runner(parsed["fixed_code"], problem.samples)
-        last = FirstPass(**parsed, check=check, attempts=attempt)
+        last = FirstPass(**parsed, check=check, attempts=attempts)
         if check.passed is not False:
-            return last
+            break
         feedback = _failure_feedback(check)
     if last is None:
         raise TutorError("LLM から有効な修正案を得られませんでした")
-    return last
+    if last.check.passed is not True or _is_small_fix(code, last.fixed_code):
+        return last
+
+    attempts += 1
+    parsed = _parse_first_pass(generate(build_first_prompt(problem, code, verdict, TOO_LARGE_FEEDBACK), FIRST_PASS_SCHEMA))
+    if parsed is None:
+        return replace(last, attempts=attempts)
+    check = runner(parsed["fixed_code"], problem.samples)
+    if check.passed is True and _changed_lines(code, parsed["fixed_code"]) < _changed_lines(code, last.fixed_code):
+        return FirstPass(**parsed, check=check, attempts=attempts)
+    return replace(last, attempts=attempts)
 
 
 def find_similar(
@@ -491,11 +533,13 @@ def explain(
     body_text: str,
     username: str | None = None,
     runner: Callable[[str, list[dict]], SampleCheck] = run_samples,
+    generate_first: Generate | None = None,
 ) -> TutorResult:
+    """generate_first を渡すと、LLM 1 回目（修正案）だけそちらを使う。"""
     warnings: list[str] = []
 
     # ① ② 修正案とサンプル確認
-    fix = generate_fix(generate, problem, code, verdict, runner)
+    fix = generate_fix(generate_first or generate, problem, code, verdict, runner)
     if fix.check.passed is None:
         warnings.append("保存済みのサンプルがないため、修正コードの確認を飛ばしました")
     elif fix.check.passed is False:

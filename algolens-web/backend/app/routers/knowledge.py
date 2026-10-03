@@ -61,7 +61,7 @@ def _gemini_client():
         raise HTTPException(status_code=503, detail=f"Gemini クライアント初期化失敗: {e}")
 
 
-def _call_gemini(client, prompt: str, schema: dict | None = None) -> str:
+def _call_gemini(client, prompt: str, schema: dict | None = None, model: str = "gemini-2.5-flash-lite") -> str:
     """Gemini を呼び出してテキストを返す。エラー種別ごとに明示的な HTTPException を返す。
 
     schema を渡すと、その形の JSON で返すよう Gemini に強制する。
@@ -69,7 +69,7 @@ def _call_gemini(client, prompt: str, schema: dict | None = None) -> str:
     try:
         from google.genai import types
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model=model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,

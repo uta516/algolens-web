@@ -287,3 +287,82 @@ def test_explain_gives_up_after_max_retries_and_marks_thinking_mistake(db):
     assert result.log.samples_passed is False
     assert result.log.mistake_level == "考え方"
     assert any("サンプルを通りませんでした" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# サンプルは通ったが変更が大きすぎるときのやり直し
+# ---------------------------------------------------------------------------
+
+from app.services.tutor import TOO_LARGE_FEEDBACK  # noqa: E402
+
+_SMALL_RIGHT = _ORIGINAL.replace("*", "+")
+# サンプルは通るが、元の 2 行に対して 5 行変わる書き直し
+_LARGE_RIGHT = (
+    "import sys\n"
+    "def main():\n"
+    "    x, y = map(int, sys.stdin.readline().split())\n"
+    "    print(x + y)\n"
+    "main()\n"
+)
+_LARGE_RIGHT_2 = _LARGE_RIGHT.replace("x, y", "p, q").replace("x + y", "p + q")
+
+
+def _first_pass_prompts(llm: _FakeLLM) -> list[str]:
+    return [p for p in llm.prompts if "explanation:" not in p]
+
+
+def test_large_fix_is_retried_once_and_smaller_fix_is_adopted(db):
+    llm = _FakeLLM([_LARGE_RIGHT, _SMALL_RIGHT])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+
+    prompts = _first_pass_prompts(llm)
+    assert len(prompts) == 2
+    assert TOO_LARGE_FEEDBACK in prompts[1]
+    assert result.attempts == 2
+    assert result.log.fixed_code == _SMALL_RIGHT
+    assert result.log.diff_lines == 1
+    assert result.log.mistake_level == "書き方"
+
+
+def test_large_fix_stays_thinking_mistake_when_retry_is_still_large(db):
+    llm = _FakeLLM([_LARGE_RIGHT, _LARGE_RIGHT_2])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+
+    assert len(_first_pass_prompts(llm)) == 2  # やり直しは 1 回だけ
+    assert result.attempts == 2
+    assert result.log.fixed_code == _LARGE_RIGHT
+    assert result.log.samples_passed is True
+    assert result.log.mistake_level == "考え方"
+
+
+def test_large_fix_is_kept_when_retry_fails_samples(db):
+    wrong = _ORIGINAL.replace("*", "-")
+    llm = _FakeLLM([_LARGE_RIGHT, wrong])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+
+    assert result.log.fixed_code == _LARGE_RIGHT
+    assert result.log.samples_passed is True
+    assert result.log.mistake_level == "考え方"
+
+
+def test_small_fix_is_not_retried(db):
+    llm = _FakeLLM([_SMALL_RIGHT])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+
+    assert len(_first_pass_prompts(llm)) == 1
+    assert result.attempts == 1
+
+
+def test_first_pass_uses_generate_first_when_given(db):
+    first = _FakeLLM([_SMALL_RIGHT])
+    other = _FakeLLM([])
+
+    explain(db, other, None, _PROBLEM, _ORIGINAL, "WA", body_text="", generate_first=first)
+
+    assert len(first.prompts) == 1
+    assert len(other.prompts) == 1  # 最終解説だけ
+    assert "explanation:" in other.prompts[0]

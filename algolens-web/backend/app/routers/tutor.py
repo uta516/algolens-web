@@ -17,6 +17,10 @@ from app.services.tutor import TutorError, explain, load_problem
 router = APIRouter(prefix="/tutor", tags=["tutor"])
 logger = logging.getLogger(__name__)
 
+# 修正案（LLM 1 回目）は精度の高い flash、それ以外と flash が使えないときは flash-lite
+FIRST_PASS_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
 # Gemini が混雑（503 UNAVAILABLE）のときに待つ秒数。要素数が再試行の回数
 _BUSY_RETRY_WAITS = (2, 5, 10)
 
@@ -25,10 +29,14 @@ def _is_busy(e: HTTPException) -> bool:
     return e.status_code == 500 and ("503" in str(e.detail) or "UNAVAILABLE" in str(e.detail))
 
 
-def _call_with_retry(client, prompt: str, schema: dict) -> str:
+def _is_quota_exceeded(e: HTTPException) -> bool:
+    return e.status_code == 429
+
+
+def _call_with_retry(client, prompt: str, schema: dict, model: str = DEFAULT_MODEL) -> str:
     for wait in (*_BUSY_RETRY_WAITS, None):
         try:
-            return _call_gemini(client, prompt, schema)
+            return _call_gemini(client, prompt, schema, model)
         except HTTPException as e:
             if not _is_busy(e):
                 raise
@@ -36,6 +44,17 @@ def _call_with_retry(client, prompt: str, schema: dict) -> str:
                 raise HTTPException(status_code=503, detail="Gemini が混雑しています。少し時間をおいて再度お試しください。")
             logger.warning("Gemini が混雑しているため %d 秒後に再試行します", wait)
             time.sleep(wait)
+
+
+def _call_first_pass(client, prompt: str, schema: dict) -> str:
+    """flash を 1 回試し、混雑・クォータ超過なら flash-lite（混雑時は再試行あり）に切り替える。"""
+    try:
+        return _call_gemini(client, prompt, schema, FIRST_PASS_MODEL)
+    except HTTPException as e:
+        if not (_is_busy(e) or _is_quota_exceeded(e)):
+            raise
+        logger.warning("%s が使えないため %s に切り替えます: %s", FIRST_PASS_MODEL, DEFAULT_MODEL, e.detail)
+    return _call_with_retry(client, prompt, schema, DEFAULT_MODEL)
 
 
 @lru_cache(maxsize=1)
@@ -70,6 +89,9 @@ def explain_submission(req: ExplainRequest, db: Session = Depends(get_db)):
     def generate(prompt: str, schema: dict) -> dict:
         return _parse_json(_call_with_retry(client, prompt, schema))
 
+    def generate_first(prompt: str, schema: dict) -> dict:
+        return _parse_json(_call_first_pass(client, prompt, schema))
+
     try:
         result = explain(
             db,
@@ -80,6 +102,7 @@ def explain_submission(req: ExplainRequest, db: Session = Depends(get_db)):
             req.verdict,
             body_text=get_problem_body_text(req.problem_id),
             username=req.username,
+            generate_first=generate_first,
         )
     except TutorError as e:
         raise HTTPException(status_code=502, detail=str(e))
