@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
@@ -9,11 +10,15 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
 from app.models.mistake_log import MistakeLog
+from app.models.submission import Submission
 from app.models.tutor_report import KIND_AC, KIND_MISTAKE, KIND_SKIPPED, REPORT_DONE, REPORT_PENDING, TutorReport
 from app.services.review import (
+    SYNC_FAILED_WARNING,
     ReviewDeps,
     ReviewError,
+    gather_submissions,
     judge_suggestion,
+    sync_user_submissions,
     plan_contest,
     problem_index_of,
     process_report,
@@ -365,3 +370,62 @@ def test_process_ac_rejects_suggestion_that_misses_criteria(db):
     assert payload["summary"] == "この解き方で十分です"
     assert payload["sample_cases"] == []  # 基準を満たさない提案はサンプル実行もしない
     assert "当てはまらない" in payload["note"]
+
+
+# ---------------------------------------------------------------------------
+# 提出データの同期に失敗したとき
+# ---------------------------------------------------------------------------
+
+_PROBLEMS = [{"id": p, "title": t} for p, t in _TITLES.items()]
+
+
+def _api_down():
+    raise httpx.ConnectError("[WinError 10054] 既存の接続はリモート ホストに強制的に切断されました。")
+
+
+def test_gather_uses_db_submissions_when_api_fails(db):
+    sync_user_submissions(db, "me", _SUBS, _PROBLEMS)  # 以前の同期で DB に入っている
+
+    gathered = gather_submissions(db, "me", "abc400", _api_down, lambda: _PROBLEMS)
+
+    assert gathered.warnings == [SYNC_FAILED_WARNING]
+    assert gathered.synced == 0
+    assert sorted(s["id"] for s in gathered.submissions) == [1, 2, 3, 4]
+    # DB の提出からでも、最後の提出の選び方・WA 回数・振り分けが API のときと同じになる
+    reports = plan_contest(db, "me", "abc400", gathered.submissions, _TITLES)
+    summary = {r.problem_index: (r.submission_id, r.verdict, r.wa_count, r.kind) for r in reports}
+    assert summary == {
+        "A": (1, "AC", 0, KIND_AC),
+        "B": (3, "WA", 1, KIND_MISTAKE),
+        "C": (4, "CE", 0, KIND_SKIPPED),
+    }
+
+
+def test_gather_fails_when_api_fails_and_db_has_no_submissions_for_contest(db):
+    # 別のコンテストの提出だけ DB にある
+    sync_user_submissions(db, "me", [_sub(9, "abc399_a", "AC", 50, contest="abc399")], [{"id": "abc399_a", "title": "A"}])
+
+    with pytest.raises(ReviewError, match="DB にも abc400 の提出がありません"):
+        gather_submissions(db, "me", "abc400", _api_down, lambda: _PROBLEMS)
+
+
+def test_gather_ignores_other_users_submissions_in_db(db):
+    sync_user_submissions(db, "someone", _SUBS, _PROBLEMS)
+    with pytest.raises(ReviewError):
+        gather_submissions(db, "me", "abc400", _api_down, lambda: _PROBLEMS)
+
+
+def test_gather_continues_without_sync_when_problem_list_fails(db):
+    gathered = gather_submissions(db, "me", "abc400", lambda: _SUBS, _api_down)
+
+    assert gathered.warnings == [SYNC_FAILED_WARNING]
+    assert gathered.submissions == _SUBS     # 取れた最新の提出で続ける
+    assert _count(db, Submission) == 0       # DB には同期していない
+
+
+def test_gather_syncs_without_warning_when_api_works(db):
+    gathered = gather_submissions(db, "me", "abc400", lambda: _SUBS, lambda: _PROBLEMS)
+
+    assert gathered.warnings == []
+    assert gathered.synced == 4
+    assert _count(db, Submission) == 4

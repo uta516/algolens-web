@@ -45,6 +45,8 @@ class ImportResponse(BaseModel):
     # 今回 DB に追加した提出の件数
     synced_submissions: int
     reports: list[ReportSummary]
+    # 提出データを最新にできなかったときなどの注意
+    warnings: list[str] = []
 
 
 class CodeIn(BaseModel):

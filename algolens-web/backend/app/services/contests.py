@@ -7,6 +7,8 @@ import time
 
 import httpx
 
+from app.services.atcoder_fetcher import get_with_retry
+
 CONTESTS_URL = "https://kenkoooo.com/atcoder/resources/contests.json"
 _CACHE_TTL_SEC = 3600
 _cache: dict[str, tuple[float, list[dict]]] = {}
@@ -20,15 +22,9 @@ def fetch_contests() -> list[dict]:
     hit = _cache.get("contests")
     if hit and time.time() - hit[0] < _CACHE_TTL_SEC:
         return hit[1]
-    # kenkoooo.com はまれに接続を切ることがあるため、接続エラーだけ少し待って取り直す
-    for wait in (2, 5, None):
-        try:
-            resp = httpx.get(CONTESTS_URL, timeout=60)
-            break
-        except httpx.TransportError:
-            if wait is None:
-                raise
-            time.sleep(wait)
+    # kenkoooo.com はまれに接続を切るため、接続エラーは 2 → 5 → 10 秒待って取り直す
+    with httpx.Client(timeout=60) as client:
+        resp = get_with_retry(client, CONTESTS_URL)
     resp.raise_for_status()
     contests = resp.json()
     _cache["contests"] = (time.time(), contests)

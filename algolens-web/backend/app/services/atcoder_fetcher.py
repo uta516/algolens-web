@@ -6,7 +6,9 @@ AtCoder Problems API (非公式・公開):
   - 難易度:   https://kenkoooo.com/atcoder/resources/problem-models.json
 """
 
+import time
 from datetime import datetime
+from typing import Callable
 
 import httpx
 
@@ -14,6 +16,27 @@ _BASE = "https://kenkoooo.com/atcoder"
 _HEADERS = {"User-Agent": "AlgoLens/0.1 (https://github.com/your-repo)"}
 
 _PAGE_SIZE = 500  # AtCoder Problems API の1ページあたり上限件数
+# 続けてリクエストするときの間隔（AtCoder Problems の API の案内: 1 秒以上あける）
+PAGE_INTERVAL_SEC = 1.0
+# 接続を切られたときに待ってから取り直す秒数（要素数が取り直しの回数）
+RETRY_WAITS_SEC = (2, 5, 10)
+
+
+def get_with_retry(
+    client: httpx.Client,
+    url: str,
+    params: dict | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> httpx.Response:
+    """GET する。接続エラー（kenkoooo.com はまれに接続を切る）のときだけ 2 → 5 → 10 秒待って取り直す。"""
+    for wait in (*RETRY_WAITS_SEC, None):
+        try:
+            return client.get(url, params=params)
+        except httpx.TransportError as e:
+            if wait is None:
+                raise
+            print(f"[WARN] {url} への接続に失敗しました（{e}）。{wait} 秒後に取り直します")
+            sleep(wait)
 
 
 def fetch_user_submissions(username: str, from_second: int = 0) -> list[dict]:
@@ -21,6 +44,7 @@ def fetch_user_submissions(username: str, from_second: int = 0) -> list[dict]:
 
     API は1リクエストあたり最大 _PAGE_SIZE 件を古い順に返す。
     返却件数が 0 件になるまでループし、from_second を更新しながら全ページを取得する。
+    ページの間は 1 秒以上あけ、接続エラーは get_with_retry で取り直す。
     """
     url = f"{_BASE}/atcoder-api/v3/user/submissions"
     all_subs: list[dict] = []
@@ -29,8 +53,10 @@ def fetch_user_submissions(username: str, from_second: int = 0) -> list[dict]:
 
     with httpx.Client(headers=_HEADERS, timeout=30) as client:
         while True:
+            if page > 1:
+                time.sleep(PAGE_INTERVAL_SEC)
             params = {"user": username, "from_second": current_from}
-            resp = client.get(url, params=params)
+            resp = get_with_retry(client, url, params=params)
             resp.raise_for_status()
             batch: list[dict] = resp.json()
 
@@ -64,7 +90,7 @@ def fetch_problems() -> list[dict]:
     """全問題リストを取得する。"""
     url = f"{_BASE}/resources/problems.json"
     with httpx.Client(headers=_HEADERS, timeout=30) as client:
-        resp = client.get(url)
+        resp = get_with_retry(client, url)
         resp.raise_for_status()
     return resp.json()
 

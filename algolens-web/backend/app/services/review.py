@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -245,6 +246,72 @@ def sync_user_submissions(db: Session, username: str, raw_subs: list[dict], prob
         inserted += 1
     db.commit()
     return inserted
+
+
+SYNC_FAILED_WARNING = "提出データを最新にできなかったため、参考の判定が古い可能性があります"
+
+
+def db_contest_submissions(db: Session, username: str, contest_id: str) -> list[dict]:
+    """DB にあるユーザーのコンテストの提出を、AtCoder Problems API と同じ形の辞書で返す。"""
+    rows = db.execute(
+        select(Submission, Problem.atcoder_problem_id)
+        .join(Problem, Problem.id == Submission.problem_id)
+        .join(User, User.id == Submission.user_id)
+        .where(User.atcoder_username == username, Problem.contest_id == contest_id)
+    ).all()
+    prefix = f"{contest_id}_"
+    subs = []
+    for sub, atcoder_problem_id in rows:
+        if sub.atcoder_submission_id is None:
+            continue
+        # DB の atcoder_problem_id は "{contest_id}_{problem_id}"
+        problem_id = atcoder_problem_id[len(prefix):] if atcoder_problem_id.startswith(prefix) else atcoder_problem_id
+        subs.append({
+            "id": sub.atcoder_submission_id,
+            "epoch_second": calendar.timegm(sub.submitted_at.timetuple()),
+            "problem_id": problem_id,
+            "contest_id": contest_id,
+            "result": sub.status,
+            "language": sub.language or "",
+        })
+    return subs
+
+
+@dataclass(frozen=True)
+class GatheredSubmissions:
+    submissions: list[dict]
+    synced: int          # 今回 DB に追加した提出の件数
+    warnings: list[str]
+
+
+def gather_submissions(
+    db: Session,
+    username: str,
+    contest_id: str,
+    fetch_submissions: Callable[[], list[dict]],
+    fetch_problems: Callable[[], list[dict]],
+) -> GatheredSubmissions:
+    """取り込みに使う提出を集め、取れたものは DB に同期する。
+
+    - API から提出を取れなければ、DB にあるそのコンテストの提出で続ける（警告を付ける）。
+      DB にも 1 件もなければ ReviewError
+    - 提出は取れたが問題一覧が取れず DB に同期できないときも、取れた提出で続ける（警告を付ける）
+    """
+    try:
+        subs = fetch_submissions()
+    except httpx.HTTPError as e:
+        subs = db_contest_submissions(db, username, contest_id)
+        if not subs:
+            raise ReviewError(
+                f"AtCoder Problems API から提出を取得できず、DB にも {contest_id} の提出がありません: {e}"
+            ) from e
+        return GatheredSubmissions(subs, 0, [SYNC_FAILED_WARNING])
+
+    try:
+        problems = fetch_problems()
+    except httpx.HTTPError:
+        return GatheredSubmissions(subs, 0, [SYNC_FAILED_WARNING])
+    return GatheredSubmissions(subs, sync_user_submissions(db, username, subs, problems), [])
 
 
 # ---------------------------------------------------------------------------

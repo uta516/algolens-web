@@ -34,6 +34,13 @@ from app.schemas.review import (
     SavedContestOut,
 )
 from app.services.atcoder_fetcher import fetch_problems, fetch_user_submissions
+from app.services.contests import (
+    UNKNOWN_MESSAGE,
+    contest_end_epoch,
+    fetch_contests,
+    find_contest,
+    finished_error,
+)
 from app.services.editorial_chunker import get_problem_body_text
 from app.services.editorial_index import index_problem
 from app.services.editorial_scraper import AtCoderClient
@@ -41,6 +48,7 @@ from app.services.review import (
     CodeRequired,
     ReviewDeps,
     ReviewError,
+    gather_submissions,
     last_synced_epoch,
     latest_reports,
     plan_contest,
@@ -48,14 +56,6 @@ from app.services.review import (
     problem_index_of,
     process_report,
     set_report_code,
-    sync_user_submissions,
-)
-from app.services.contests import (
-    UNKNOWN_MESSAGE,
-    contest_end_epoch,
-    fetch_contests,
-    find_contest,
-    finished_error,
 )
 from app.services.tutor import TutorError
 from app.services.workspace import find_local_code, resolve_submissions_dir
@@ -89,9 +89,13 @@ def _recent_abc_contests(limit: int = _RECENT_CONTESTS) -> list[dict]:
 
 
 def _problem_titles(contest_id: str) -> dict[str, str]:
-    """problem_id → "C. 問題名"（AtCoder Problems の問題一覧から）。"""
+    """problem_id → "C. 問題名"（AtCoder Problems の問題一覧から。取れなければ空で、記号だけ表示する）。"""
+    try:
+        problems = _cached("problems", fetch_problems)
+    except httpx.HTTPError:
+        return {}
     titles = {}
-    for p in _cached("problems", fetch_problems):
+    for p in problems:
         if p.get("contest_id") == contest_id:
             titles[p["id"]] = f"{problem_index_of(p['id'])}. {p.get('name', '')}".rstrip(". ")
     return titles
@@ -151,15 +155,21 @@ def import_contest(req: ImportRequest, db: Session = Depends(get_db)):
     # 同期の続き（前回の最新提出以降）とコンテストの開始のうち早い方から 1 回で取る
     from_second = min(last_synced_epoch(db, req.username), contest["start_epoch_second"])
     try:
-        subs = fetch_user_submissions(req.username, from_second=from_second)
-        problems = _cached("problems", fetch_problems)
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"AtCoder Problems API から取得できませんでした: {e}")
-    synced = sync_user_submissions(db, req.username, subs, problems)
-    reports = plan_contest(db, req.username, req.contest_id, subs, _problem_titles(req.contest_id))
+        gathered = gather_submissions(
+            db, req.username, req.contest_id,
+            fetch_submissions=lambda: fetch_user_submissions(req.username, from_second=from_second),
+            fetch_problems=lambda: _cached("problems", fetch_problems),
+        )
+    except ReviewError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    reports = plan_contest(db, req.username, req.contest_id, gathered.submissions, _problem_titles(req.contest_id))
     if not reports:
         raise HTTPException(status_code=404, detail=f"{req.username} の {req.contest_id} への提出が見つかりません")
-    return ImportResponse(synced_submissions=synced, reports=[_summary(r) for r in reports])
+    return ImportResponse(
+        synced_submissions=gathered.synced,
+        reports=[_summary(r) for r in reports],
+        warnings=gathered.warnings,
+    )
 
 
 @router.post("/process/{report_id}", response_model=ReportSummary)

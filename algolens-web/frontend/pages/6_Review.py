@@ -228,7 +228,10 @@ def run_import(contest_id: str) -> None:
         return
     body = r.json()
     reports = body["reports"]
-    st.caption(f"提出データを同期しました（新しく追加した提出: {body['synced_submissions']} 件）")
+    for w in body.get("warnings", []):
+        st.warning(w)
+    if not body.get("warnings"):
+        st.caption(f"提出データを同期しました（新しく追加した提出: {body['synced_submissions']} 件）")
     pending = [x for x in reports if x["status"] != "done"]
     if not pending:
         st.success(f"{contest_id} の {len(reports)} 問はすべて処理済みです。")
