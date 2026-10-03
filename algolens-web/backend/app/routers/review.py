@@ -2,8 +2,10 @@
 
 Streamlit から次の順に呼ぶ:
   GET  /review/contests?username=     取り込めるコンテスト（直近の ABC で提出があるもの）
-  POST /review/import                  最後の提出ごとに pending の行を作る
+  POST /review/import                  提出データを DB に同期し、最後の提出ごとに pending の行を作る
   POST /review/process/{report_id}     1 問処理して保存（これを pending の数だけ順番に呼ぶ）
+                                       提出コードが手元にないときは 422 を返す
+  PUT  /review/reports/{report_id}/code  画面で貼り付けた提出コードを保存する
   GET  /review/reports                 保存済みの結果
 """
 
@@ -11,30 +13,44 @@ import json
 import threading
 import time
 from functools import lru_cache
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.tutor_report import REPORT_DONE, TutorReport
 from app.routers.knowledge import _gemini_client
 from app.routers.tutor import _searcher, gemini_generators
-from app.schemas.review import ContestOut, ImportRequest, ReportOut, ReportSummary, SavedContestOut
+from app.schemas.review import (
+    CodeIn,
+    ContestOut,
+    ImportRequest,
+    ImportResponse,
+    ReportOut,
+    ReportSummary,
+    SavedContestOut,
+)
 from app.services.atcoder_fetcher import fetch_problems, fetch_user_submissions
 from app.services.editorial_chunker import get_problem_body_text
 from app.services.editorial_index import index_problem
 from app.services.editorial_scraper import AtCoderClient
 from app.services.review import (
+    CodeRequired,
     ReviewDeps,
     ReviewError,
-    fetch_submission_code,
+    find_local_code,
+    last_synced_epoch,
     latest_reports,
     plan_contest,
     prepare_problem_data,
     problem_index_of,
     process_report,
+    set_report_code,
+    sync_user_submissions,
 )
 from app.services.tutor import TutorError
 
@@ -87,6 +103,11 @@ def _atcoder_client() -> AtCoderClient:
     return AtCoderClient(interval=1.5)
 
 
+def _submissions_dir() -> Path | None:
+    value = settings.submissions_dir.strip()
+    return Path(value).expanduser() if value else None
+
+
 def _summary(r: TutorReport) -> ReportSummary:
     return ReportSummary(
         id=r.id, contest_id=r.contest_id, problem_id=r.problem_id, problem_index=r.problem_index,
@@ -116,21 +137,24 @@ def list_contests(username: str):
     ]
 
 
-@router.post("/import", response_model=list[ReportSummary])
+@router.post("/import", response_model=ImportResponse)
 def import_contest(req: ImportRequest, db: Session = Depends(get_db)):
-    """コンテストの提出を取得し、問題ごとの最後の提出について pending の行を作る（既にあれば作らない）。"""
+    """ユーザーの提出データを DB に同期してから、問題ごとの最後の提出について pending の行を作る。"""
     contest = next((c for c in _cached("contests", _fetch_contests) if c["id"] == req.contest_id), None)
     if contest is None:
         raise HTTPException(status_code=404, detail=f"コンテスト {req.contest_id} が見つかりません")
+    # 同期の続き（前回の最新提出以降）とコンテストの開始のうち早い方から 1 回で取る
+    from_second = min(last_synced_epoch(db, req.username), contest["start_epoch_second"])
     try:
-        subs = fetch_user_submissions(req.username, from_second=contest["start_epoch_second"])
-        titles = _problem_titles(req.contest_id)
+        subs = fetch_user_submissions(req.username, from_second=from_second)
+        problems = _cached("problems", fetch_problems)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"AtCoder Problems API から取得できませんでした: {e}")
-    reports = plan_contest(db, req.username, req.contest_id, subs, titles)
+    synced = sync_user_submissions(db, req.username, subs, problems)
+    reports = plan_contest(db, req.username, req.contest_id, subs, _problem_titles(req.contest_id))
     if not reports:
         raise HTTPException(status_code=404, detail=f"{req.username} の {req.contest_id} への提出が見つかりません")
-    return [_summary(r) for r in reports]
+    return ImportResponse(synced_submissions=synced, reports=[_summary(r) for r in reports])
 
 
 @router.post("/process/{report_id}", response_model=ReportSummary)
@@ -156,19 +180,34 @@ def process_one(report_id: int, db: Session = Depends(get_db)):
             generate=generate,
             generate_first=generate_first,
             searcher=store,
-            fetch_code=lambda contest_id, sid: fetch_submission_code(client, contest_id, sid),
+            find_code=lambda r: find_local_code(_submissions_dir(), r.problem_id),
             prepare_problem=lambda r: prepare_problem_data(client, r, index_editorials),
             body_text=get_problem_body_text,
         )
         process_report(db, report, deps)
     except HTTPException:
         raise
+    except CodeRequired as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except (ReviewError, TutorError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"AtCoder から取得できませんでした: {e}")
     finally:
         _process_lock.release()
+    return _summary(report)
+
+
+@router.put("/reports/{report_id}/code", response_model=ReportSummary)
+def put_code(report_id: int, body: CodeIn, db: Session = Depends(get_db)):
+    """画面で貼り付けた提出コードを保存する（このあと /process を呼ぶ）。"""
+    report = db.get(TutorReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="結果が見つかりません")
+    try:
+        set_report_code(db, report, body.code)
+    except ReviewError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     return _summary(report)
 
 

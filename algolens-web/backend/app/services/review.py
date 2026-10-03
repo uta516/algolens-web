@@ -5,22 +5,26 @@
                  （同じ提出の行が既にあれば作らない）
   process_report pending の行を 1 問ずつ処理して done にする（done の行は作り直さない）
                  - WA / TLE / RE: 家庭教師（tutor.explain）と同じ流れ
-                 - AC: もっと簡単・速い解き方があるかを LLM に聞き、サンプルで確かめる
+                 - AC: 計算量が良くなる / 行数が半分以下になる解き方だけ提案し、サンプルで確かめる
                  - それ以外（CE、Python 以外の言語など）: 対象外
 
 1 問ごとにコミットするので、途中で止まっても pending の行から再開できる。
-外部アクセス（AtCoder・Gemini・解説ストア）は ReviewDeps で差し替えられる。
+外部アクセス（AtCoder・Gemini・解説ストア）と提出コードの取得は ReviewDeps で差し替えられる。
+提出コードは手元のフォルダか画面での貼り付けで用意する（提出ページは robots.txt で禁止）。
 """
 
+import calendar
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
-from bs4 import BeautifulSoup
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.problem import Problem
+from app.models.submission import Submission
 from app.models.tutor_report import (
     KIND_AC,
     KIND_MISTAKE,
@@ -29,8 +33,9 @@ from app.models.tutor_report import (
     REPORT_PENDING,
     TutorReport,
 )
+from app.models.user import User
+from app.services.atcoder_fetcher import normalize_submission
 from app.services.editorial_scraper import (
-    ATCODER_BASE,
     EDITORIALS_DIR,
     AtCoderClient,
     TargetProblem,
@@ -59,6 +64,10 @@ MISTAKE_VERDICTS = ("WA", "TLE", "RE")
 
 class ReviewError(Exception):
     """1 問の処理を続けられなかったときの例外（行は pending のまま残る）。"""
+
+
+class CodeRequired(ReviewError):
+    """提出コードが手元のフォルダになく、画面での貼り付けが必要なとき。"""
 
 
 # ---------------------------------------------------------------------------
@@ -180,30 +189,94 @@ def plan_contest(
 
 
 # ---------------------------------------------------------------------------
+# 提出データの同期（「参考」= AC 済みの判定を最新にするため）
+# ---------------------------------------------------------------------------
+
+def last_synced_epoch(db: Session, username: str) -> int:
+    """DB にあるユーザーの最新の提出時刻（epoch 秒）。提出がなければ 0。"""
+    stmt = (
+        select(func.max(Submission.submitted_at))
+        .join(User, User.id == Submission.user_id)
+        .where(User.atcoder_username == username)
+    )
+    latest = db.scalar(stmt)
+    # normalize_submission は UTC の naive datetime で保存している
+    return calendar.timegm(latest.timetuple()) if latest else 0
+
+
+def sync_user_submissions(db: Session, username: str, raw_subs: list[dict], problems: list[dict]) -> int:
+    """AtCoder Problems API の提出を DB に追加し、追加した件数を返す。
+
+    /sync/submissions と違い、ユーザーや問題が DB になければ作る
+    （開催直後のコンテストの問題は、問題一覧の同期前でも提出を取り込めるように）。
+    """
+    user = db.scalar(select(User).where(User.atcoder_username == username))
+    if user is None:
+        user = User(atcoder_username=username)
+        db.add(user)
+        db.flush()
+
+    sids = [s["id"] for s in raw_subs]
+    existing = set(db.scalars(
+        select(Submission.atcoder_submission_id).where(Submission.atcoder_submission_id.in_(sids))
+    ).all()) if sids else set()
+    titles = {p["id"]: p.get("title") or p.get("name", "") for p in problems}
+    problem_cache: dict[str, Problem] = {}
+
+    inserted = 0
+    for raw in raw_subs:
+        if raw["id"] in existing:
+            continue
+        normalized = normalize_submission(raw)
+        pid_str = normalized.pop("_atcoder_problem_id")
+        problem = problem_cache.get(pid_str) or db.scalar(select(Problem).where(Problem.atcoder_problem_id == pid_str))
+        if problem is None:
+            problem = Problem(
+                atcoder_problem_id=pid_str,
+                contest_id=raw["contest_id"].lower(),
+                problem_index=raw["problem_id"][-1].upper(),
+                title=titles.get(raw["problem_id"], raw["problem_id"]),
+                url=f"https://atcoder.jp/contests/{raw['contest_id']}/tasks/{raw['problem_id']}",
+            )
+            db.add(problem)
+            db.flush()
+        problem_cache[pid_str] = problem
+        db.add(Submission(user_id=user.id, problem_id=problem.id, **normalized))
+        existing.add(raw["id"])
+        inserted += 1
+    db.commit()
+    return inserted
+
+
+# ---------------------------------------------------------------------------
 # AC の提案
 # ---------------------------------------------------------------------------
 
 AC_SCHEMA = {
     "type": "OBJECT",
     "properties": {
+        "current_complexity": {"type": "STRING"},
         "has_better": {"type": "BOOLEAN"},
-        "improvement": {"type": "STRING", "enum": ["もっと簡単", "もっと速い", "なし"]},
+        "faster": {"type": "BOOLEAN"},
+        "better_complexity": {"type": "STRING"},
         "better_code": {"type": "STRING"},
-        "explanation": {"type": "STRING"},
+        "current_review": {"type": "STRING"},
+        "suggestion_reason": {"type": "STRING"},
         "correct_idea": {"type": "STRING"},
     },
-    "required": ["has_better", "improvement", "better_code", "explanation", "correct_idea"],
+    "required": [
+        "current_complexity", "has_better", "faster", "better_complexity",
+        "better_code", "current_review", "suggestion_reason", "correct_idea",
+    ],
 }
 
 
 def build_ac_prompt(problem: ProblemData, code: str) -> str:
     return f"""あなたは AtCoder の家庭教師です。生徒の Python 提出コードは AC しました。
-もっと簡単な書き方（短く読みやすい）や、もっと速い解き方（計算量が良い）があるかを判断してください。
-
-## 判断の基準
-- 明らかに良くなる場合だけ has_better を true にする。書き方の好みの違い程度なら false
-- false のときは improvement を "なし"、better_code を空文字にする
-- true のときは better_code に標準入力から読み標準出力に書く Python コード全体を書く（コードブロック記号は付けない）
+次のどちらかに当てはまる、明らかに良い解き方があるかを判断してください。
+  (a) 計算量（オーダー）が良くなる解き方
+  (b) コードの行数が今の半分以下になる書き方
+どちらにも当てはまらない改善（変数名・書き方の好み・定数倍の高速化など）は提案しないでください。
 
 ## 問題 ({problem.problem_id} {problem.title})
 {problem.statement}
@@ -214,12 +287,45 @@ def build_ac_prompt(problem: ProblemData, code: str) -> str:
 ```
 
 ## 出力（JSON）
-- has_better: もっと簡単・速い解き方があるか
-- improvement: "もっと簡単" / "もっと速い" / "なし"
-- better_code: 提案するコード（なければ空文字）
-- explanation: Markdown で簡潔に。今の解き方の評価と、提案があればどこが良くなるか（行番号を指して）
+- current_complexity: 生徒のコードの時間計算量（例: "O(N^2)"）
+- has_better: (a) か (b) に当てはまる解き方があるか
+- faster: 提案が (a) 計算量が良くなるものか
+- better_complexity: 提案の時間計算量（提案がなければ空文字）
+- better_code: 提案する Python コード全体。標準入力から読み標準出力に書く。コードブロック記号は付けない（なければ空文字）
+- current_review: Markdown で簡潔に、生徒の今の解き方の評価（良い点と計算量）
+- suggestion_reason: Markdown で簡潔に、提案がどう良くなるか（行番号を指して。なければ空文字）
 - correct_idea: この問題を解く考え方を一文で（使う手法名があれば手法名を含める）
 """
+
+
+def count_code_lines(code: str) -> int:
+    """空行とコメントだけの行を除いた行数。"""
+    return sum(1 for line in code.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+def _normalize_complexity(text: str) -> str:
+    return "".join(text.split()).lower()
+
+
+def judge_suggestion(
+    original: str,
+    better: str,
+    faster: bool,
+    current_complexity: str,
+    better_complexity: str,
+) -> str | None:
+    """AC の提案を出す基準を満たすなら理由のラベル、満たさなければ None を返す。
+
+    - 計算量が良くなる: LLM が faster とし、かつ計算量の表記が今と違う場合
+    - 行数が半分以下: 空行・コメントを除いた行数で比べる（プログラムで判定）
+    """
+    cur, new = _normalize_complexity(current_complexity), _normalize_complexity(better_complexity)
+    if faster and cur and new and cur != new:
+        return f"計算量が良くなる（{current_complexity.strip()} → {better_complexity.strip()}）"
+    before, after = count_code_lines(original), count_code_lines(better)
+    if 0 < after and after * 2 <= before:
+        return f"行数が半分以下（{before} 行 → {after} 行）"
+    return None
 
 
 def review_accepted(
@@ -232,7 +338,10 @@ def review_accepted(
     username: str | None = None,
     runner: Callable[[str, list[dict]], SampleCheck] = run_samples,
 ) -> dict:
-    """AC の提出について、もっと簡単・速い解き方を提案する。mistake_logs には保存しない。"""
+    """AC の提出について、基準（計算量が良くなる / 行数が半分以下）を満たす解き方だけを提案する。
+
+    mistake_logs には保存しない。
+    """
     warnings: list[str] = []
     data = generate(build_ac_prompt(problem, code), AC_SCHEMA)
     better_code = _strip_code_fence(data.get("better_code") or "").strip()
@@ -240,30 +349,41 @@ def review_accepted(
 
     suggestion = None
     sample_cases: list = []
+    note = ""
     if data.get("has_better") is True and better_code:
-        check = runner(better_code, problem.samples)
-        sample_cases = [asdict(c) for c in check.cases]
-        if check.passed is False:
-            warnings.append("提案されたコードがサンプルを通らなかったため、提案はしません")
+        label = judge_suggestion(
+            code, better_code, data.get("faster") is True,
+            data.get("current_complexity") or "", data.get("better_complexity") or "",
+        )
+        if label is None:
+            note = "提案はありましたが、計算量が良くなる・行数が半分以下のどちらにも当てはまらないため出していません"
         else:
-            if check.passed is None:
-                warnings.append("保存済みのサンプルがないため、提案コードは未確認です")
-            diff, changed, total = compute_diff(code, better_code)
-            suggestion = {
-                "improvement": data.get("improvement", ""),
-                "code": better_code,
-                "diff": diff,
-                "diff_lines": changed,
-                "total_lines": total,
-                "samples_passed": check.passed,
-            }
+            check = runner(better_code, problem.samples)
+            sample_cases = [asdict(c) for c in check.cases]
+            if check.passed is False:
+                note = "提案されたコードがサンプルを通らなかったため、提案はしません"
+            else:
+                if check.passed is None:
+                    warnings.append("保存済みのサンプルがないため、提案コードは未確認です")
+                diff, changed, total = compute_diff(code, better_code)
+                suggestion = {
+                    "improvement": label,
+                    "code": better_code,
+                    "reason": (data.get("suggestion_reason") or "").strip(),
+                    "diff": diff,
+                    "diff_lines": changed,
+                    "total_lines": total,
+                    "samples_passed": check.passed,
+                }
 
     similar = find_similar(searcher, problem.problem_id, body_text, correct_idea, warnings) if correct_idea else []
     reference, next_problems = split_by_solved(db, similar, username)
     return {
         "suggestion": suggestion,
         "summary": "もっと良い解き方の提案があります" if suggestion else "この解き方で十分です",
-        "explanation": (data.get("explanation") or "").strip(),
+        "current_complexity": (data.get("current_complexity") or "").strip(),
+        "explanation": (data.get("current_review") or "").strip(),
+        "note": note,
         "correct_idea": correct_idea,
         "sample_cases": sample_cases,
         "reference": [asdict(p) for p in reference],
@@ -309,8 +429,8 @@ def tutor_result_to_dict(result: TutorResult) -> dict:
 class ReviewDeps:
     generate: Generate
     searcher: Searcher | None
-    # (contest_id, submission_id) -> 提出コード（取れなければ None）
-    fetch_code: Callable[[str, int], str | None]
+    # 提出コードを手元で探す（見つからなければ None）。提出ページは robots.txt で禁止のため取得しない
+    find_code: Callable[[TutorReport], str | None]
     # 問題文・サンプル・公式解説を用意する -> (問題データ, 公式解説が公開済みか)
     prepare_problem: Callable[[TutorReport], tuple[ProblemData, bool]]
     # 本問の公式解説本文（検索1 のクエリ。Gemini には渡さない）
@@ -352,9 +472,11 @@ def process_report(db: Session, report: TutorReport, deps: ReviewDeps) -> TutorR
             return report
 
         if report.original_code is None:
-            code = deps.fetch_code(report.contest_id, report.submission_id)
+            code = deps.find_code(report)
             if not code:
-                raise ReviewError("提出コードを取得できませんでした（提出ページが非公開の可能性があります）")
+                raise CodeRequired(
+                    f"{report.problem_id} の提出コードが手元のフォルダにありません。画面で貼り付けてください"
+                )
             report.original_code = code
             db.commit()  # 再開時に取り直さないよう、コードは先に保存する
 
@@ -403,11 +525,39 @@ def _finish(db: Session, report: TutorReport, payload: dict, editorial_available
 # 外部アクセスの本物の実装
 # ---------------------------------------------------------------------------
 
-def fetch_submission_code(client: AtCoderClient, contest_id: str, submission_id: int) -> str | None:
-    """提出ページから提出コードを取り出す（auto_reporter.py と同じく #submission-code）。"""
-    html = client.get(f"{ATCODER_BASE}/contests/{contest_id}/submissions/{submission_id}")
-    pre = BeautifulSoup(html, "html.parser").select_one("pre#submission-code")
-    return pre.get_text() if pre else None
+CODE_EXTENSIONS = (".py", ".txt")
+
+
+def find_local_code(base_dir: Path | None, problem_id: str) -> str | None:
+    """手元のフォルダから、ファイル名に問題IDを含むコードを探して返す（なければ None）。
+
+    例: abc476_d.py / abc476_d_wa.py / 476/abc476_d.txt（サブフォルダも探す）。
+    "abc476_d" が "abc476_dx" などに誤って一致しないよう、前後が英数字でないものに限る。
+    複数あれば更新日時が最も新しいものを使う。
+    """
+    if base_dir is None or not base_dir.is_dir():
+        return None
+    pattern = re.compile(rf"(?<![a-z0-9]){re.escape(problem_id.lower())}(?![a-z0-9])")
+    candidates = [
+        path for path in base_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in CODE_EXTENSIONS and pattern.search(path.stem.lower())
+    ]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return newest.read_text(encoding="utf-8", errors="replace")
+
+
+def set_report_code(db: Session, report: TutorReport, code: str) -> TutorReport:
+    """画面で貼り付けた提出コードを保存する。処理済みの行は変えない。"""
+    if report.status == REPORT_DONE:
+        raise ReviewError("処理済みの問題のコードは変更できません")
+    if not code.strip():
+        raise ReviewError("コードが空です")
+    report.original_code = code
+    report.error = None
+    db.commit()
+    return report
 
 
 def prepare_problem_data(

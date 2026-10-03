@@ -13,6 +13,7 @@ from app.models.tutor_report import KIND_AC, KIND_MISTAKE, KIND_SKIPPED, REPORT_
 from app.services.review import (
     ReviewDeps,
     ReviewError,
+    judge_suggestion,
     plan_contest,
     problem_index_of,
     process_report,
@@ -105,6 +106,12 @@ _ORIGINAL = "a, b = map(int, input().split())\nprint(a * b)\n"
 _RIGHT = _ORIGINAL.replace("*", "+")
 
 
+def _ac_response(has_better=True, faster=False, better_code="", cur="O(1)", new=""):
+    return {"current_complexity": cur, "has_better": has_better, "faster": faster,
+            "better_complexity": new, "better_code": better_code, "current_review": "十分です",
+            "suggestion_reason": "", "correct_idea": "足し算する"}
+
+
 class _FakeLLM:
     """プロンプトの種類（修正案 / 最終解説 / AC の提案）を見て決まった JSON を返す。"""
 
@@ -117,16 +124,15 @@ class _FakeLLM:
         if "explanation" in props and "has_better" not in props:
             return {"explanation": "解説"}
         if "has_better" in props:
-            return {"has_better": False, "improvement": "なし", "better_code": "",
-                    "explanation": "十分です", "correct_idea": "足し算する"}
+            return _ac_response(has_better=False)
         return {"fixed_code": _RIGHT, "gap_summary": "掛け算していた", "mistake_type": "読み違い",
                 "lesson": "演算子を確認する", "correct_idea": "足し算する"}
 
 
 def _deps(llm, fetched: list | None = None, code: str | None = _ORIGINAL) -> ReviewDeps:
-    def fetch_code(contest_id, submission_id):
+    def find_code(report):
         if fetched is not None:
-            fetched.append(submission_id)
+            fetched.append(report.submission_id)
         return code
 
     def prepare_problem(report):
@@ -136,7 +142,7 @@ def _deps(llm, fetched: list | None = None, code: str | None = _ORIGINAL) -> Rev
         ), False
 
     return ReviewDeps(
-        generate=llm, searcher=None, fetch_code=fetch_code,
+        generate=llm, searcher=None, find_code=find_code,
         prepare_problem=prepare_problem, body_text=lambda pid: "",
     )
 
@@ -206,13 +212,13 @@ def test_process_ac_shows_suggestion_only_when_samples_pass(db):
     ac = next(r for r in reports if r.kind == KIND_AC)
 
     def llm(prompt, schema):
-        return {"has_better": True, "improvement": "もっと簡単", "better_code": "print(sum(map(int, input().split())))\n",
-                "explanation": "sum で書ける", "correct_idea": "足し算する"}
+        # 2 行 → 1 行（半分以下）
+        return _ac_response(better_code="print(sum(map(int, input().split())))\n")
 
     process_report(db, ac, _deps(llm))
 
     suggestion = json.loads(ac.payload)["suggestion"]
-    assert suggestion["improvement"] == "もっと簡単"
+    assert suggestion["improvement"].startswith("行数が半分以下")
     assert suggestion["samples_passed"] is True
 
 
@@ -221,8 +227,8 @@ def test_process_ac_drops_suggestion_that_fails_samples(db):
     ac = next(r for r in reports if r.kind == KIND_AC)
 
     def llm(prompt, schema):
-        return {"has_better": True, "improvement": "もっと速い", "better_code": "print(0)\n",
-                "explanation": "", "correct_idea": "足し算する"}
+        # 1 行（半分以下）だがサンプルを通らない
+        return _ac_response(better_code="print(0)\n")
 
     process_report(db, ac, _deps(llm))
 
@@ -307,3 +313,55 @@ def test_missing_code_raises_and_stays_pending(db):
     with pytest.raises(ReviewError):
         process_report(db, ac, _deps(_FakeLLM(), code=None))
     assert ac.status == REPORT_PENDING
+
+
+# ---------------------------------------------------------------------------
+# AC の提案の基準（計算量が良くなる / 行数が半分以下）
+# ---------------------------------------------------------------------------
+
+def _lines(n: int, name: str = "x") -> str:
+    return "".join(f"{name}{i} = {i}\n" for i in range(n))
+
+
+def test_judge_suggestion_accepts_better_complexity():
+    label = judge_suggestion(_lines(10), _lines(10), True, "O(N^2)", "O(N log N)")
+    assert label == "計算量が良くなる（O(N^2) → O(N log N)）"
+
+
+def test_judge_suggestion_rejects_faster_claim_with_same_complexity():
+    # 定数倍の高速化だけなら提案しない（空白・大文字小文字の違いは同じとみなす）
+    assert judge_suggestion(_lines(10), _lines(10), True, "O(N)", "o( n )") is None
+
+
+def test_judge_suggestion_rejects_faster_claim_without_complexity():
+    assert judge_suggestion(_lines(10), _lines(10), True, "O(N^2)", "") is None
+
+
+def test_judge_suggestion_accepts_exactly_half_lines():
+    assert judge_suggestion(_lines(10), _lines(5, "y"), False, "O(1)", "O(1)") == "行数が半分以下（10 行 → 5 行）"
+
+
+def test_judge_suggestion_rejects_more_than_half_lines():
+    assert judge_suggestion(_lines(10), _lines(6, "y"), False, "O(1)", "O(1)") is None
+
+
+def test_judge_suggestion_ignores_blank_and_comment_lines():
+    padded = "# コメント\n\n" + "\n".join(f"y{i} = {i}\n" for i in range(5)) + "    # おわり\n"
+    assert judge_suggestion(_lines(10), padded, False, "", "") == "行数が半分以下（10 行 → 5 行）"
+
+
+def test_process_ac_rejects_suggestion_that_misses_criteria(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+
+    def llm(prompt, schema):
+        # 2 行 → 2 行で計算量も同じ: 基準を満たさない
+        return _ac_response(better_code="x, y = map(int, input().split())\nprint(x + y)\n", new="O(1)")
+
+    process_report(db, ac, _deps(llm))
+
+    payload = json.loads(ac.payload)
+    assert payload["suggestion"] is None
+    assert payload["summary"] == "この解き方で十分です"
+    assert payload["sample_cases"] == []  # 基準を満たさない提案はサンプル実行もしない
+    assert "当てはまらない" in payload["note"]

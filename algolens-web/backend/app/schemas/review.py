@@ -39,3 +39,13 @@ class SavedContestOut(BaseModel):
     contest_id: str
     problem_count: int
     done_count: int
+
+
+class ImportResponse(BaseModel):
+    # 今回 DB に追加した提出の件数
+    synced_submissions: int
+    reports: list[ReportSummary]
+
+
+class CodeIn(BaseModel):
+    code: str = Field(min_length=1, max_length=50_000)

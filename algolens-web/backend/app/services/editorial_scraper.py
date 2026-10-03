@@ -24,9 +24,8 @@ from bs4 import BeautifulSoup, Tag
 ATCODER_BASE = "https://atcoder.jp"
 EDITORIALS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "editorials"
 
-# 提出ページは "Mozilla/5.0 (compatible; ...)" 形式でない User-Agent を 403 で拒否するため、
-# ボットの標準的な書式でツール名を名乗る（auto_reporter.py と同じ形式）
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AlgoLens/0.1; +https://github.com/uta516/algolens-web)"}
+# 提出ページ（/contests/*/submissions/）は robots.txt で禁止されているため取得しない
+_HEADERS = {"User-Agent": "AlgoLens/0.1 (github.com/uta516/algolens-web)"}
 _OFFICIAL_LABELS = {"公式", "Official"}
 _ALT_TITLE = re.compile(r"別解|Another", re.IGNORECASE)
 _EDITORIAL_HREF = re.compile(r"^/contests/[^/]+/editorial/(\d+)$")

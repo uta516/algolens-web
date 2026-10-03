@@ -118,7 +118,7 @@ def render_mistake(result: dict) -> None:
 
 
 def render_ac(payload: dict, original_code: str | None) -> None:
-    """AC の提出への、もっと簡単・速い解き方の提案。"""
+    """AC の提出への提案（計算量が良くなる / 行数が半分以下の場合だけ）。"""
     for w in payload["warnings"]:
         st.warning(w)
     suggestion = payload.get("suggestion")
@@ -126,10 +126,17 @@ def render_ac(payload: dict, original_code: str | None) -> None:
         st.success(f"💡 {payload['summary']}（{suggestion['improvement']}）")
     else:
         st.info(f"👍 {payload['summary']}")
+    if payload.get("note"):
+        st.caption(payload["note"])
+    if payload.get("current_complexity"):
+        st.markdown(f"**今の計算量:** {payload['current_complexity']}")
     if payload.get("correct_idea"):
         st.markdown(f"**考え方:** {payload['correct_idea']}")
     if payload.get("explanation"):
         st.markdown(payload["explanation"])
+    if suggestion and suggestion.get("reason"):
+        st.markdown("**提案のポイント**")
+        st.markdown(suggestion["reason"])
 
     if suggestion:
         tab_new, tab_diff, tab_orig, tab_samples = st.tabs(["提案コード", "差分", "元のコード", "サンプル結果"])
@@ -149,12 +156,54 @@ def render_ac(payload: dict, original_code: str | None) -> None:
     _similar(payload)
 
 
+def process_report(report_id: int, label: str) -> dict | None:
+    """1 問処理する。成功すれば結果、失敗すればエラーを表示して None。"""
+    try:
+        res = requests.post(f"{API_BASE}/review/process/{report_id}", timeout=900)
+    except requests.exceptions.RequestException as e:
+        st.error(f"{label}: 通信エラー（{e}）")
+        return None
+    if res.status_code >= 400:
+        st.error(f"{label}: {_extract_detail(res)}")
+        return None
+    return res.json()
+
+
+def render_code_form(r: dict) -> None:
+    """提出コードが手元のフォルダにない問題に、コードを貼り付けて処理する欄を出す。"""
+    st.warning(
+        "提出コードが手元のフォルダにありません。上の「提出」リンクを開いてコードをコピーし、"
+        "ここに貼り付けてください（または SUBMISSIONS_DIR に問題IDを含む名前で保存してから取り込み直す）。"
+    )
+    with st.form(f"code_form_{r['id']}"):
+        code = st.text_area("提出コード（Python）", height=250, key=f"code_{r['id']}")
+        submitted = st.form_submit_button("このコードで処理する", type="primary")
+    if not submitted:
+        return
+    if not code.strip():
+        st.warning("コードを貼り付けてください。")
+        return
+    res = requests.put(f"{API_BASE}/review/reports/{r['id']}/code", json={"code": code}, timeout=30)
+    if res.status_code >= 400:
+        st.error(f"保存できませんでした: {_extract_detail(res)}")
+        return
+    with st.spinner(f"{r['title']} を処理しています（1 分ほどかかることがあります）..."):
+        out = process_report(r["id"], r["title"])
+    if out:
+        st.rerun()
+
+
 def render_report(r: dict) -> None:
     url = f"https://atcoder.jp/contests/{r['contest_id']}/tasks/{r['problem_id']}"
     sub_url = f"https://atcoder.jp/contests/{r['contest_id']}/submissions/{r['submission_id']}"
     st.markdown(f"[問題ページ]({url}) ・ [提出 #{r['submission_id']}]({sub_url}) ・ {r['language']}")
     if r["status"] != "done":
-        st.warning(f"未処理です。{('前回のエラー: ' + r['error']) if r['error'] else ''}")
+        if r["kind"] in ("ac", "mistake") and not r["original_code"]:
+            render_code_form(r)
+        else:
+            if r["error"]:
+                st.warning(f"前回のエラー: {r['error']}")
+            st.info("未処理です。「最新コンテストを取り込む」を押すと続きから処理します。")
         return
     payload = r["payload"] or {}
     if r["kind"] == "skipped":
@@ -177,7 +226,9 @@ def run_import(contest_id: str) -> None:
     if r.status_code >= 400:
         st.error(f"取り込みに失敗しました ({r.status_code}): {_extract_detail(r)}")
         return
-    reports = r.json()
+    body = r.json()
+    reports = body["reports"]
+    st.caption(f"提出データを同期しました（新しく追加した提出: {body['synced_submissions']} 件）")
     pending = [x for x in reports if x["status"] != "done"]
     if not pending:
         st.success(f"{contest_id} の {len(reports)} 問はすべて処理済みです。")
@@ -188,6 +239,7 @@ def run_import(contest_id: str) -> None:
     log = st.container()
     started = time.time()
     done = calls = 0
+    need_code = []
     for i, rep in enumerate(pending):
         label = f"{rep['title']}（{rep['verdict']}）"
         bar.progress(i / len(pending), text=f"{i + 1}/{len(pending)}: {label} を処理中...")
@@ -197,6 +249,10 @@ def run_import(contest_id: str) -> None:
         except requests.exceptions.RequestException as e:
             log.error(f"{label}: 通信エラー（{e}）。もう一度取り込むと続きから再開します。")
             break
+        if res.status_code == 422:
+            need_code.append(rep["title"])
+            log.write(f"📋 {label}: 提出コードが手元にないため、あとで貼り付けてください")
+            continue
         if res.status_code >= 400:
             log.error(f"{label}: {_extract_detail(res)}")
             if res.status_code in (409, 429, 503):
@@ -209,6 +265,8 @@ def run_import(contest_id: str) -> None:
         log.write(f"✔ {label}: {time.time() - t0:.0f} 秒 / Gemini {out['gemini_calls']} 回")
     bar.progress(1.0, text="完了")
     st.success(f"{done}/{len(pending)} 問を処理しました（{time.time() - started:.0f} 秒、Gemini 呼び出し {calls} 回）")
+    if need_code:
+        st.info(f"提出コードの貼り付けが必要な問題: {', '.join(need_code)}（下の一覧から貼り付けられます）")
 
 
 # ============================================================
