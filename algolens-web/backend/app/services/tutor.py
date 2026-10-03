@@ -218,11 +218,11 @@ def save_mistake_log(db: Session, **fields) -> MistakeLog:
     return log
 
 
-def count_past_same_type(db: Session, mistake_type: str, exclude_id: int) -> int:
-    """同じ mistake_type の記録のうち、今回の記録を除いた件数。"""
-    stmt = select(func.count(MistakeLog.id)).where(
-        MistakeLog.mistake_type == mistake_type, MistakeLog.id != exclude_id
-    )
+def count_past_same_type(db: Session, mistake_type: str, exclude_id: int | None = None) -> int:
+    """同じ mistake_type の記録の件数。exclude_id を渡すとその記録（今回の分）を除く。"""
+    stmt = select(func.count(MistakeLog.id)).where(MistakeLog.mistake_type == mistake_type)
+    if exclude_id is not None:
+        stmt = stmt.where(MistakeLog.id != exclude_id)
     return db.scalar(stmt) or 0
 
 
@@ -477,7 +477,7 @@ def find_similar(
     if body_text:
         queries.append(("解き方が同じ", body_text))
     else:
-        warnings.append(f"{problem_id} の公式解説本文がないため、検索1を飛ばしました")
+        warnings.append(f"{problem_id} の公式解説が公開されていないため、検索1（同じ解き方）を飛ばしました")
     queries.append(("落とし穴が同じ", correct_idea))
 
     found: dict[str, SimilarProblem] = {}
@@ -523,6 +523,17 @@ def solved_problem_ids(db: Session, username: str | None = None) -> set[str]:
     return solved
 
 
+def split_by_solved(
+    db: Session, similar: list[SimilarProblem], username: str | None
+) -> tuple[list[SimilarProblem], list[SimilarProblem]]:
+    """似た問題を (AC 済み = 参考, 未 AC = 次に解く問題) に分ける。"""
+    solved = solved_problem_ids(db, username)
+    return (
+        [p for p in similar if p.problem_id in solved],
+        [p for p in similar if p.problem_id not in solved],
+    )
+
+
 def explain(
     db: Session,
     generate: Generate,
@@ -549,7 +560,24 @@ def explain(
     diff, changed, total = compute_diff(code, fix.fixed_code)
     level = classify_level(changed, total, fix.check.passed)
 
-    # ④ 記録帳
+    # ④ 同じミスの過去回数（記録の保存は最後に行う）
+    past = count_past_same_type(db, fix.mistake_type)
+
+    # ⑤ ⑥ 似た問題を検索して AC 済み / 未 AC に分ける
+    similar = find_similar(searcher, problem.problem_id, body_text, fix.correct_idea, warnings)
+    reference, next_problems = split_by_solved(db, similar, username)
+
+    # ⑦ 最終解説（公式解説の本文は渡さない）
+    prompt = build_explanation_prompt(
+        problem, code, fix.fixed_code, diff, fix.gap_summary, fix.correct_idea,
+        fix.mistake_type, past, similar,
+    )
+    explanation = generate(prompt, EXPLANATION_SCHEMA).get("explanation", "")
+    if not isinstance(explanation, str) or not explanation.strip():
+        explanation = ""
+        warnings.append("解説の生成に失敗しました（LLM の出力が空でした）")
+
+    # ④ 記録帳: 途中で LLM が失敗したときに記録だけ残らないよう、すべて揃ってから保存する
     log = save_mistake_log(
         db,
         problem_id=problem.problem_id,
@@ -565,23 +593,6 @@ def explain(
         correct_idea=fix.correct_idea,
         lesson=fix.lesson,
     )
-    past = count_past_same_type(db, fix.mistake_type, exclude_id=log.id)
-
-    # ⑤ ⑥ 似た問題を検索して AC 済み / 未 AC に分ける
-    similar = find_similar(searcher, problem.problem_id, body_text, fix.correct_idea, warnings)
-    solved = solved_problem_ids(db, username)
-    reference = [p for p in similar if p.problem_id in solved]
-    next_problems = [p for p in similar if p.problem_id not in solved]
-
-    # ⑦ 最終解説（公式解説の本文は渡さない）
-    prompt = build_explanation_prompt(
-        problem, code, fix.fixed_code, diff, fix.gap_summary, fix.correct_idea,
-        fix.mistake_type, past, similar,
-    )
-    explanation = generate(prompt, EXPLANATION_SCHEMA).get("explanation", "")
-    if not isinstance(explanation, str) or not explanation.strip():
-        explanation = ""
-        warnings.append("解説の生成に失敗しました（LLM の出力が空でした）")
 
     return TutorResult(
         log=log,

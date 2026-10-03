@@ -23,17 +23,15 @@ sys.path.insert(0, _backend_dir)
 from app.core.database import SessionLocal  # noqa: E402
 from app.models.problem import Problem  # noqa: E402
 from app.services.atcoder_fetcher import fetch_problem_models, fetch_problems  # noqa: E402
-from app.services.editorial_chunker import chunk_editorial  # noqa: E402
+from app.services.editorial_index import index_problem  # noqa: E402
 from app.services.editorial_scraper import (  # noqa: E402
     EDITORIALS_DIR,
     AtCoderClient,
     fetch_and_save_problem,
     load_meta,
-    parse_editorial_page,
-    problem_dir,
     select_target_problems,
 )
-from app.services.vector_store import EditorialVectorStore, build_records, resolve_chroma_dir  # noqa: E402
+from app.services.vector_store import EditorialVectorStore, resolve_chroma_dir  # noqa: E402
 
 
 def fetch_contest_problems() -> list[dict]:
@@ -98,16 +96,9 @@ def index_all(targets, reindex: bool) -> None:
             skipped += 1
             continue
 
-        records = []
-        for ed in meta["editorials"]:
-            path = problem_dir(problem.problem_id) / f"editorial_{ed['editorial_id']}.html"
-            body_html = parse_editorial_page(path.read_text(encoding="utf-8"))["body_html"]
-            records += build_records(
-                meta, ed["editorial_id"], ed["editorial_type"], chunk_editorial(body_html)
-            )
-        store.replace_problem(problem.problem_id, records)
+        n_chunks = index_problem(store, problem.problem_id)
         indexed += 1
-        print(f"登録: {problem.problem_id} ({len(records)} チャンク)")
+        print(f"登録: {problem.problem_id} ({n_chunks} チャンク)")
     print(f"登録: 新規={indexed} スキップ={skipped} 公式テキスト解説なし={no_editorial} "
           f"総チャンク数={store.count()}")
 

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import Base, engine
-from app.routers import analysis, knowledge, problems, submissions, sync, tutor, users
+from app.routers import analysis, knowledge, problems, review, submissions, sync, tutor, users
 
 # テーブルを自動作成（Alembicに移行するまでの暫定）
 Base.metadata.create_all(bind=engine)
@@ -28,6 +28,7 @@ app.include_router(analysis.router)
 app.include_router(knowledge.router)
 app.include_router(sync.router)
 app.include_router(tutor.router)
+app.include_router(review.router)
 
 
 @app.get("/health")

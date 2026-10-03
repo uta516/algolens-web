@@ -24,7 +24,9 @@ from bs4 import BeautifulSoup, Tag
 ATCODER_BASE = "https://atcoder.jp"
 EDITORIALS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "editorials"
 
-_HEADERS = {"User-Agent": "AlgoLens/0.1 (github.com/uta516/algolens-web)"}
+# 提出ページは "Mozilla/5.0 (compatible; ...)" 形式でない User-Agent を 403 で拒否するため、
+# ボットの標準的な書式でツール名を名乗る（auto_reporter.py と同じ形式）
+_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AlgoLens/0.1; +https://github.com/uta516/algolens-web)"}
 _OFFICIAL_LABELS = {"公式", "Official"}
 _ALT_TITLE = re.compile(r"別解|Another", re.IGNORECASE)
 _EDITORIAL_HREF = re.compile(r"^/contests/[^/]+/editorial/(\d+)$")
@@ -37,7 +39,7 @@ class TargetProblem:
     contest_id: str
     problem_index: str
     title: str
-    difficulty: float
+    difficulty: float | None  # 開催直後の問題はまだ難易度がない
     tags: str
 
 
@@ -272,16 +274,48 @@ def fetch_and_save_problem(
         **asdict(problem),
         "url": task_url,
         "sample_count": len(samples),
-        "editorials": [
-            {
-                "editorial_id": ed.editorial_id,
-                "url": ed.url,
-                "title": ed.title,
-                "author": ed.author,
-                "editorial_type": ed.editorial_type,
-            }
-            for ed in editorials
-        ],
+        "editorials": _editorial_entries(editorials),
     }
     _write(pdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
     return True
+
+
+def _editorial_entries(editorials: list[EditorialLink]) -> list[dict]:
+    return [
+        {
+            "editorial_id": ed.editorial_id,
+            "url": ed.url,
+            "title": ed.title,
+            "author": ed.author,
+            "editorial_type": ed.editorial_type,
+        }
+        for ed in editorials
+    ]
+
+
+def refresh_editorials(
+    client: AtCoderClient,
+    problem_id: str,
+    base_dir: Path = EDITORIALS_DIR,
+) -> list[dict]:
+    """取得済みの問題について解説一覧を取り直し、新しく公開された公式解説を保存して meta.json を更新する。
+
+    解説がコンテスト後しばらくして公開された問題に使う。更新後の解説一覧を返す。
+    """
+    meta = load_meta(problem_id, base_dir)
+    if meta is None:
+        raise FileNotFoundError(f"{problem_id} の meta.json がありません")
+    pdir = problem_dir(problem_id, base_dir)
+    task_url = meta.get("url") or f"{ATCODER_BASE}/contests/{meta['contest_id']}/tasks/{problem_id}"
+
+    list_html = client.get(f"{task_url}/editorial?lang=ja")
+    _write(pdir / "editorial_list.html", list_html)
+    editorials = select_official_editorials(parse_editorial_links(list_html, meta["contest_id"]))
+    for ed in editorials:
+        path = pdir / f"editorial_{ed.editorial_id}.html"
+        if not path.exists():
+            _write(path, client.get(f"{ed.url}?lang=ja"))
+
+    meta["editorials"] = _editorial_entries(editorials)
+    _write(pdir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+    return meta["editorials"]

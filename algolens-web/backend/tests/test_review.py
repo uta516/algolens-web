@@ -1,0 +1,309 @@
+"""振り返り: 最後の提出の選び方・WA 回数・AC と WA の振り分け・再開（作り直さない）のテスト。"""
+
+import json
+
+import pytest
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base
+from app.models.mistake_log import MistakeLog
+from app.models.tutor_report import KIND_AC, KIND_MISTAKE, KIND_SKIPPED, REPORT_DONE, REPORT_PENDING, TutorReport
+from app.services.review import (
+    ReviewDeps,
+    ReviewError,
+    plan_contest,
+    problem_index_of,
+    process_report,
+    select_last_submissions,
+)
+from app.services.tutor import ProblemData
+
+PY = "Python (CPython 3.11.4)"
+
+
+def _sub(sid, problem, result, t, contest="abc400", language=PY):
+    return {
+        "id": sid, "epoch_second": t, "problem_id": problem, "contest_id": contest,
+        "result": result, "language": language,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 最後の提出の選び方 / WA 回数
+# ---------------------------------------------------------------------------
+
+def test_select_last_submission_per_problem_by_time():
+    subs = [
+        _sub(3, "abc400_c", "AC", 300),
+        _sub(1, "abc400_c", "WA", 100),
+        _sub(2, "abc400_c", "TLE", 200),
+        _sub(4, "abc400_a", "AC", 50),
+    ]
+    targets = select_last_submissions(subs, "abc400")
+    assert [(t.problem_index, t.submission_id, t.verdict) for t in targets] == [
+        ("A", 4, "AC"),
+        ("C", 3, "AC"),
+    ]
+
+
+def test_select_last_submission_breaks_time_tie_by_id():
+    subs = [_sub(11, "abc400_b", "WA", 100), _sub(12, "abc400_b", "AC", 100)]
+    assert select_last_submissions(subs, "abc400")[0].submission_id == 12
+
+
+def test_select_last_submission_ignores_other_contests():
+    subs = [_sub(1, "abc400_a", "AC", 100), _sub(2, "abc399_a", "AC", 200, contest="abc399")]
+    targets = select_last_submissions(subs, "abc400")
+    assert [t.submission_id for t in targets] == [1]
+
+
+def test_wa_count_counts_only_wa_tle_re_before_last():
+    subs = [
+        _sub(1, "abc400_d", "WA", 100),
+        _sub(2, "abc400_d", "CE", 110),    # CE は数えない
+        _sub(3, "abc400_d", "RE", 120),
+        _sub(4, "abc400_d", "TLE", 130),
+        _sub(5, "abc400_d", "WA", 140),    # 最後の提出自身は数えない
+    ]
+    target = select_last_submissions(subs, "abc400")[0]
+    assert target.submission_id == 5
+    assert target.verdict == "WA"
+    assert target.wa_count == 3
+
+
+def test_wa_count_zero_for_first_try():
+    target = select_last_submissions([_sub(1, "abc400_a", "AC", 1)], "abc400")[0]
+    assert target.wa_count == 0
+
+
+def test_problem_index_of():
+    assert problem_index_of("abc400_g") == "G"
+    assert problem_index_of("abc001_1") == "A"
+
+
+# ---------------------------------------------------------------------------
+# DB と偽の外部アクセス
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db():
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
+
+
+_ORIGINAL = "a, b = map(int, input().split())\nprint(a * b)\n"
+_RIGHT = _ORIGINAL.replace("*", "+")
+
+
+class _FakeLLM:
+    """プロンプトの種類（修正案 / 最終解説 / AC の提案）を見て決まった JSON を返す。"""
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str, schema: dict) -> dict:
+        self.prompts.append(prompt)
+        props = schema["properties"]
+        if "explanation" in props and "has_better" not in props:
+            return {"explanation": "解説"}
+        if "has_better" in props:
+            return {"has_better": False, "improvement": "なし", "better_code": "",
+                    "explanation": "十分です", "correct_idea": "足し算する"}
+        return {"fixed_code": _RIGHT, "gap_summary": "掛け算していた", "mistake_type": "読み違い",
+                "lesson": "演算子を確認する", "correct_idea": "足し算する"}
+
+
+def _deps(llm, fetched: list | None = None, code: str | None = _ORIGINAL) -> ReviewDeps:
+    def fetch_code(contest_id, submission_id):
+        if fetched is not None:
+            fetched.append(submission_id)
+        return code
+
+    def prepare_problem(report):
+        return ProblemData(
+            problem_id=report.problem_id, contest_id=report.contest_id, title=report.title,
+            statement="A+B を出力せよ", samples=[{"input": "1 2\n", "output": "3\n"}],
+        ), False
+
+    return ReviewDeps(
+        generate=llm, searcher=None, fetch_code=fetch_code,
+        prepare_problem=prepare_problem, body_text=lambda pid: "",
+    )
+
+
+_SUBS = [
+    _sub(1, "abc400_a", "AC", 100),
+    _sub(2, "abc400_b", "WA", 200),
+    _sub(3, "abc400_b", "WA", 300),
+    _sub(4, "abc400_c", "CE", 400),
+]
+_TITLES = {"abc400_a": "A. Sum", "abc400_b": "B. Add", "abc400_c": "C. Hard"}
+
+
+def _count(db, model) -> int:
+    return db.scalar(select(func.count()).select_from(model))
+
+
+# ---------------------------------------------------------------------------
+# AC と WA の振り分け
+# ---------------------------------------------------------------------------
+
+def test_plan_assigns_kind_by_verdict_and_language(db):
+    subs = _SUBS + [_sub(5, "abc400_d", "WA", 500, language="C++ 20 (gcc 12.2)")]
+    reports = plan_contest(db, "me", "abc400", subs, _TITLES)
+
+    kinds = {r.problem_index: r.kind for r in reports}
+    assert kinds == {"A": KIND_AC, "B": KIND_MISTAKE, "C": KIND_SKIPPED, "D": KIND_SKIPPED}
+    b = next(r for r in reports if r.problem_index == "B")
+    assert (b.submission_id, b.wa_count, b.title) == (3, 1, "B. Add")
+    assert all(r.status == REPORT_PENDING for r in reports)
+
+
+def test_process_wa_goes_through_tutor_and_saves_mistake_log(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    wa = next(r for r in reports if r.kind == KIND_MISTAKE)
+    llm = _FakeLLM()
+
+    process_report(db, wa, _deps(llm))
+
+    assert wa.status == REPORT_DONE
+    assert wa.mistake_log_id is not None
+    assert _count(db, MistakeLog) == 1
+    payload = json.loads(wa.payload)
+    assert payload["fixed_code"] == _RIGHT
+    assert payload["mistake_level"] == "書き方"
+    assert wa.gemini_calls == 2  # 修正案 + 最終解説
+
+
+def test_process_ac_asks_for_better_solution_without_mistake_log(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+    llm = _FakeLLM()
+
+    process_report(db, ac, _deps(llm))
+
+    assert ac.status == REPORT_DONE
+    assert _count(db, MistakeLog) == 0
+    assert ac.mistake_log_id is None
+    payload = json.loads(ac.payload)
+    assert payload["suggestion"] is None
+    assert payload["summary"] == "この解き方で十分です"
+    assert ac.gemini_calls == 1
+
+
+def test_process_ac_shows_suggestion_only_when_samples_pass(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+
+    def llm(prompt, schema):
+        return {"has_better": True, "improvement": "もっと簡単", "better_code": "print(sum(map(int, input().split())))\n",
+                "explanation": "sum で書ける", "correct_idea": "足し算する"}
+
+    process_report(db, ac, _deps(llm))
+
+    suggestion = json.loads(ac.payload)["suggestion"]
+    assert suggestion["improvement"] == "もっと簡単"
+    assert suggestion["samples_passed"] is True
+
+
+def test_process_ac_drops_suggestion_that_fails_samples(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+
+    def llm(prompt, schema):
+        return {"has_better": True, "improvement": "もっと速い", "better_code": "print(0)\n",
+                "explanation": "", "correct_idea": "足し算する"}
+
+    process_report(db, ac, _deps(llm))
+
+    payload = json.loads(ac.payload)
+    assert payload["suggestion"] is None
+    assert payload["summary"] == "この解き方で十分です"
+
+
+def test_process_skipped_does_not_call_llm_or_fetch_code(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ce = next(r for r in reports if r.kind == KIND_SKIPPED)
+    llm, fetched = _FakeLLM(), []
+
+    process_report(db, ce, _deps(llm, fetched))
+
+    assert ce.status == REPORT_DONE
+    assert "CE" in json.loads(ce.payload)["reason"]
+    assert llm.prompts == [] and fetched == []
+
+
+# ---------------------------------------------------------------------------
+# 再開（作り直さない）
+# ---------------------------------------------------------------------------
+
+def test_plan_twice_does_not_duplicate_rows(db):
+    plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    assert _count(db, TutorReport) == 3
+
+
+def test_plan_keeps_done_rows_and_adds_newer_submission(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    for r in reports:
+        process_report(db, r, _deps(_FakeLLM()))
+
+    # B に新しい提出が増えた: B だけ新しい pending 行になり、他は done のまま
+    reports = plan_contest(db, "me", "abc400", _SUBS + [_sub(9, "abc400_b", "AC", 900)], _TITLES)
+
+    status = {r.problem_index: (r.submission_id, r.status) for r in reports}
+    assert status == {"A": (1, REPORT_DONE), "B": (9, REPORT_PENDING), "C": (4, REPORT_DONE)}
+    assert next(r for r in reports if r.problem_index == "B").wa_count == 2
+
+
+def test_process_done_report_is_not_regenerated(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    wa = next(r for r in reports if r.kind == KIND_MISTAKE)
+    process_report(db, wa, _deps(_FakeLLM()))
+    payload_before = wa.payload
+
+    llm, fetched = _FakeLLM(), []
+    process_report(db, wa, _deps(llm, fetched))
+
+    assert llm.prompts == [] and fetched == []
+    assert wa.payload == payload_before
+    assert _count(db, MistakeLog) == 1
+
+
+def test_failed_report_stays_pending_and_resumes_without_refetching_code(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    wa = next(r for r in reports if r.kind == KIND_MISTAKE)
+
+    def broken_llm(prompt, schema):
+        raise RuntimeError("429 quota")
+
+    fetched: list = []
+    with pytest.raises(RuntimeError):
+        process_report(db, wa, _deps(broken_llm, fetched))
+    assert wa.status == REPORT_PENDING
+    assert "429" in wa.error
+    assert wa.original_code == _ORIGINAL  # 取得済みのコードは保存されている
+    assert _count(db, MistakeLog) == 0     # 途中までの記録は残さない
+
+    process_report(db, wa, _deps(_FakeLLM(), fetched))
+    assert wa.status == REPORT_DONE
+    assert wa.error is None
+    assert fetched == [wa.submission_id]   # 提出コードは 1 回しか取りに行っていない
+
+
+def test_missing_code_raises_and_stays_pending(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+    with pytest.raises(ReviewError):
+        process_report(db, ac, _deps(_FakeLLM(), code=None))
+    assert ac.status == REPORT_PENDING
