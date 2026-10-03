@@ -248,7 +248,16 @@ def sync_user_submissions(db: Session, username: str, raw_subs: list[dict], prob
     return inserted
 
 
-SYNC_FAILED_WARNING = "提出データを最新にできなかったため、参考の判定が古い可能性があります"
+# API から提出を取れず、DB にある提出で続けるとき
+SYNC_FAILED_WARNING = (
+    "提出データを最新にできなかったため、DB にある提出で続けています。"
+    "最後の提出や参考の判定が古い可能性があります。時間をおいて取り込み直してください。"
+)
+# 最新の提出は取れたが、問題一覧が取れず DB に同期できなかったとき
+DB_NOT_SYNCED_WARNING = (
+    "提出データを DB に同期できなかったため、参考の判定が古い可能性があります。"
+    "時間をおいて取り込み直してください。"
+)
 
 
 def db_contest_submissions(db: Session, username: str, contest_id: str) -> list[dict]:
@@ -310,7 +319,7 @@ def gather_submissions(
     try:
         problems = fetch_problems()
     except httpx.HTTPError:
-        return GatheredSubmissions(subs, 0, [SYNC_FAILED_WARNING])
+        return GatheredSubmissions(subs, 0, [DB_NOT_SYNCED_WARNING])
     return GatheredSubmissions(subs, sync_user_submissions(db, username, subs, problems), [])
 
 

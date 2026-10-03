@@ -13,6 +13,7 @@ from app.models.mistake_log import MistakeLog
 from app.models.submission import Submission
 from app.models.tutor_report import KIND_AC, KIND_MISTAKE, KIND_SKIPPED, REPORT_DONE, REPORT_PENDING, TutorReport
 from app.services.review import (
+    DB_NOT_SYNCED_WARNING,
     SYNC_FAILED_WARNING,
     ReviewDeps,
     ReviewError,
@@ -418,7 +419,7 @@ def test_gather_ignores_other_users_submissions_in_db(db):
 def test_gather_continues_without_sync_when_problem_list_fails(db):
     gathered = gather_submissions(db, "me", "abc400", lambda: _SUBS, _api_down)
 
-    assert gathered.warnings == [SYNC_FAILED_WARNING]
+    assert gathered.warnings == [DB_NOT_SYNCED_WARNING]
     assert gathered.submissions == _SUBS     # 取れた最新の提出で続ける
     assert _count(db, Submission) == 0       # DB には同期していない
 
