@@ -23,6 +23,7 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.mistake_log import MistakeLog
 from app.models.problem import Problem
 from app.models.submission import Submission
 from app.models.tutor_report import (
@@ -46,8 +47,10 @@ from app.services.editorial_scraper import (
 from app.services.tutor import (
     Generate,
     ProblemData,
+    ADDRESS_RULE,
     SampleCheck,
     Searcher,
+    StressRunner,
     TutorResult,
     compute_diff,
     explain,
@@ -55,6 +58,7 @@ from app.services.tutor import (
     load_problem,
     number_lines,
     run_samples,
+    run_stress,
     split_by_solved,
     _strip_code_fence,
 )
@@ -347,7 +351,8 @@ AC_SCHEMA = {
 
 
 def build_ac_prompt(problem: ProblemData, code: str) -> str:
-    return f"""あなたは AtCoder の家庭教師です。生徒の Python 提出コードは AC しました。
+    return f"""AtCoder の家庭教師として答えてください。私の Python 提出コードは AC しました。
+{ADDRESS_RULE}
 次のどちらかに当てはまる、明らかに良い解き方があるかを判断してください。
   (a) 計算量（オーダー）が良くなる解き方
   (b) コードの行数が今の半分以下になる書き方
@@ -356,18 +361,18 @@ def build_ac_prompt(problem: ProblemData, code: str) -> str:
 ## 問題 ({problem.problem_id} {problem.title})
 {problem.statement}
 
-## 生徒のコード（各行の先頭は行番号）
+## 私のコード（各行の先頭は行番号）
 ```
 {number_lines(code)}
 ```
 
 ## 出力（JSON）
-- current_complexity: 生徒のコードの時間計算量（例: "O(N^2)"）
+- current_complexity: 私のコードの時間計算量（例: "O(N^2)"）
 - has_better: (a) か (b) に当てはまる解き方があるか
 - faster: 提案が (a) 計算量が良くなるものか
 - better_complexity: 提案の時間計算量（提案がなければ空文字）
 - better_code: 提案する Python コード全体。標準入力から読み標準出力に書く。コードブロック記号は付けない（なければ空文字）
-- current_review: Markdown で簡潔に、生徒の今の解き方の評価（良い点と計算量）
+- current_review: Markdown で簡潔に、私の今の解き方の評価（良い点と計算量）
 - suggestion_reason: Markdown で簡潔に、提案がどう良くなるか（行番号を指して。なければ空文字）
 - correct_idea: この問題を解く考え方を一文で（使う手法名があれば手法名を含める）
 """
@@ -497,7 +502,32 @@ def tutor_result_to_dict(result: TutorResult) -> dict:
         "reference": [asdict(p) for p in result.reference],
         "next_problems": [asdict(p) for p in result.next_problems],
         "warnings": result.warnings,
+        "complexity": result.complexity,
+        "estimated_ops": result.estimated_ops,
+        "stress": asdict(result.stress) if result.stress is not None else None,
+        "fix_status": log.fix_status,
+        "submitted_verdict": log.submitted_verdict,
+        "retry_of_id": log.retry_of_id,
     }
+
+
+def update_report_after_submit(db: Session, log: MistakeLog, new_payload: dict | None) -> TutorReport | None:
+    """修正版の提出結果を、その記録を表示している振り返りの行にも反映する。
+
+    作り直した場合（new_payload あり）は、行の表示と記録をその新しい結果に差し替える。
+    """
+    report = db.scalar(select(TutorReport).where(TutorReport.mistake_log_id == log.id))
+    if report is None:
+        return None
+    if new_payload is not None:
+        report.payload = json.dumps(new_payload, ensure_ascii=False)
+        report.mistake_log_id = new_payload["log_id"]
+    else:
+        payload = json.loads(report.payload or "{}")
+        payload |= {"fix_status": log.fix_status, "submitted_verdict": log.submitted_verdict}
+        report.payload = json.dumps(payload, ensure_ascii=False)
+    db.commit()
+    return report
 
 
 @dataclass
@@ -512,6 +542,7 @@ class ReviewDeps:
     body_text: Callable[[str], str]
     generate_first: Generate | None = None
     runner: Callable[[str, list[dict]], SampleCheck] = run_samples
+    stress_runner: StressRunner = run_stress
 
 
 @dataclass
@@ -563,7 +594,7 @@ def process_report(db: Session, report: TutorReport, deps: ReviewDeps) -> TutorR
             result = explain(
                 db, generate, deps.searcher, problem, report.original_code, report.verdict,
                 body_text=body_text, username=report.username, runner=deps.runner,
-                generate_first=counter.wrap(deps.generate_first),
+                generate_first=counter.wrap(deps.generate_first), stress_runner=deps.stress_runner,
             )
             payload = tutor_result_to_dict(result)
             report.mistake_log_id = result.log.id

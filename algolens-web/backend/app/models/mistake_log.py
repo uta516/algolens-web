@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -14,6 +14,9 @@ MISTAKE_TYPES: tuple[str, ...] = (
     "読み違い",
 )
 MISTAKE_LEVELS: tuple[str, ...] = ("書き方", "考え方")
+# fix_status: 修正版を提出した結果。None は「提出での確認はまだ」
+FIX_CONFIRMED = "確認済み"   # 提出して AC
+FIX_FAILED = "修正失敗"      # 提出して AC 以外。同じミスの回数の集計から外す
 
 
 class MistakeLog(Base):
@@ -40,3 +43,9 @@ class MistakeLog(Base):
     gap_summary: Mapped[str] = mapped_column(Text, nullable=False)
     correct_idea: Mapped[str] = mapped_column(Text, nullable=False)
     lesson: Mapped[str] = mapped_column(Text, nullable=False)
+    # 以下は後から追加した列のため NULL 可（既存の DB には起動時に ALTER TABLE で足す）
+    fix_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # 修正版を提出した判定 AC / WA / TLE / RE
+    submitted_verdict: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # 「修正失敗」の記録から作り直した場合、その元の記録
+    retry_of_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("mistake_logs.id"), nullable=True)

@@ -85,6 +85,72 @@ def _sample_cases(cases: list[dict]) -> None:
             st.caption("エラー"); st.code(case["stderr"])
 
 
+def verification_summary(result: dict) -> str:
+    """修正版について何を確かめたかを 1 行で（例: サンプル 3/3 通過・最大サイズの入力 0.8 秒・提出での確認はまだ）。"""
+    cases = result["sample_cases"]
+    passed = sum(1 for c in cases if c["status"] == "AC")
+    parts = [f"サンプル {passed}/{len(cases)} 通過" if cases else "サンプル 確認なし"]
+
+    stress = result.get("stress")
+    if stress is None:
+        parts.append("最大サイズの入力 未実行")
+    elif stress["status"] == "ok":
+        parts.append(
+            f"最大サイズの入力 {stress['seconds']:.1f} 秒"
+            f"（{stress['interpreter']}・制限 {stress['time_limit']:g} 秒）"
+        )
+    elif stress["status"] == "TLE":
+        parts.append(f"最大サイズの入力 {stress['time_limit']:g} 秒で時間切れ（{stress['interpreter']}）")
+    else:
+        parts.append("最大サイズの入力 確認できず")
+
+    status = result.get("fix_status")
+    if status is None:
+        parts.append("提出での確認はまだ")
+    elif status == "確認済み":
+        parts.append("提出で AC（確認済み）")
+    else:
+        parts.append(f"提出で {result.get('submitted_verdict')}（修正失敗）")
+    return "・".join(parts)
+
+
+def render_submit_result_form(result: dict) -> None:
+    """修正版を提出した結果を戻す欄。AC 以外なら、その結果を伝えて修正版を作り直す。"""
+    log_id = result.get("log_id")
+    if log_id is None or result.get("fix_status") == "確認済み":
+        return
+    if result.get("fix_status") == "修正失敗":
+        st.caption(f"この修正版は提出で {result.get('submitted_verdict')} でした。")
+    with st.form(f"submit_result_{log_id}"):
+        col1, col2 = st.columns([1, 2])
+        verdict = col1.selectbox("修正版を提出した結果", ["AC", "WA", "TLE", "RE"], key=f"submit_verdict_{log_id}")
+        col2.write("")
+        sent = col2.form_submit_button("結果を記録する（AC 以外なら作り直す）")
+    if not sent:
+        return
+    with st.spinner("記録しています（AC 以外なら、結果を伝えて修正版を作り直します。1 分ほどかかることがあります）..."):
+        try:
+            r = requests.post(
+                f"{API_BASE}/tutor/logs/{log_id}/submit-result",
+                json={"verdict": verdict, "username": username or None},
+                timeout=900,
+            )
+        except requests.exceptions.RequestException as e:
+            st.error(f"通信エラー（{e}）")
+            return
+    if r.status_code >= 400:
+        st.error(f"エラー ({r.status_code}): {_extract_detail(r)}")
+        return
+    body = r.json()
+    # 手入力の結果を表示中なら差し替える（振り返りの一覧は再読み込みで反映される）
+    current = st.session_state.get("tutor_result")
+    if current and current.get("log_id") == log_id:
+        st.session_state["tutor_result"] = body["result"] or current | {
+            "fix_status": body["fix_status"], "submitted_verdict": body["submitted_verdict"],
+        }
+    st.rerun()
+
+
 def render_mistake(result: dict) -> None:
     """WA / TLE / RE の家庭教師の結果。"""
     for w in result["warnings"]:
@@ -94,8 +160,15 @@ def render_mistake(result: dict) -> None:
     c1.metric("ミスの種類", result["mistake_type"])
     c2.metric("書き方 / 考え方", result["mistake_level"])
     c3.metric("同じミスの過去回数", f"{result['past_same_type_count']} 回")
-    samples = {True: "通過", False: "不通過", None: "確認なし"}[result["samples_passed"]]
-    c4.metric("サンプル", samples, help=f"修正案の作成回数: {result['attempts']} 回")
+    ops = result.get("estimated_ops")
+    c4.metric(
+        "修正版の計算量", result.get("complexity") or "不明",
+        help=f"制約の上限での計算回数の目安: {ops:.1e} 回" if ops is not None else "計算回数の目安: 不明",
+    )
+
+    st.markdown(f"**確かめたこと:** {verification_summary(result)}")
+    st.caption(f"修正案の作成回数: {result['attempts']} 回")
+    render_submit_result_form(result)
 
     st.markdown(f"**ずれ:** {result['gap_summary']}")
     st.markdown(f"**正しい考え方:** {result['correct_idea']}")
@@ -342,7 +415,7 @@ with tab_manual:
                 "verdict": verdict,
                 "username": username or None,
             }
-            with st.spinner("Gemini が修正案を作り、サンプルで確認しています（1 分ほどかかることがあります）..."):
+            with st.spinner("Gemini が修正案を作り、サンプルと最大サイズの入力で確認しています（1 分ほどかかることがあります）..."):
                 try:
                     r = requests.post(f"{API_BASE}/tutor/explain", json=payload, timeout=300)
                 except requests.exceptions.ConnectionError:

@@ -366,3 +366,214 @@ def test_first_pass_uses_generate_first_when_given(db):
     assert len(first.prompts) == 1
     assert len(other.prompts) == 1  # 最終解説だけ
     assert "explanation:" in other.prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# 最大サイズの入力での時間切れ・計算回数の目安によるやり直し
+# ---------------------------------------------------------------------------
+
+from app.models.mistake_log import FIX_CONFIRMED, FIX_FAILED  # noqa: E402
+from app.services.tutor import (  # noqa: E402
+    OPS_LIMIT,
+    STRESS_OK,
+    STRESS_SKIPPED,
+    STRESS_TLE,
+    STRESS_TLE_FEEDBACK,
+    StressCheck,
+    TutorError,
+    count_past_same_type,
+    record_submit_result,
+    run_stress,
+)
+
+_GEN = "print('1 2')\n"
+
+
+class _FakeLLMWithChecks:
+    """1 回目の応答ごとに (修正コード, 計算回数の目安) を返す偽物。"""
+
+    def __init__(self, fixes: list[tuple[str, float]], mistake_type: str = "読み違い"):
+        self.fixes = fixes
+        self.mistake_type = mistake_type
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str, schema: dict) -> dict:
+        self.prompts.append(prompt)
+        if "explanation" in schema["properties"]:
+            return {"explanation": "解説"}
+        code, ops = self.fixes.pop(0)
+        return {
+            "fixed_code": code,
+            "gap_summary": "掛け算していた",
+            "mistake_type": self.mistake_type,
+            "lesson": "演算子を確認する",
+            "correct_idea": "足し算する",
+            "complexity": "O(1)",
+            "estimated_ops": ops,
+            "max_input_generator": _GEN,
+        }
+
+
+class _FakeStress:
+    """修正コードごとに決めた結果を返す（指定がなければ 0.1 秒で通る）。"""
+
+    def __init__(self, tle_codes: set[str] = frozenset()):
+        self.tle_codes = tle_codes
+        self.calls: list[str] = []
+
+    def __call__(self, code: str, generator: str, time_limit: float) -> StressCheck:
+        self.calls.append(code)
+        if code in self.tle_codes:
+            return StressCheck(STRESS_TLE, "CPython", time_limit * 5)
+        return StressCheck(STRESS_OK, "CPython", time_limit * 5, seconds=0.1, input_bytes=10)
+
+
+_SLOW = _SMALL_RIGHT + "# slow\n"  # サンプルは通るが、最大サイズの入力で時間切れになる想定
+
+
+def test_stress_tle_asks_to_improve_complexity_and_retries(db):
+    llm = _FakeLLMWithChecks([(_SLOW, 1e6), (_SMALL_RIGHT, 1e6)])
+    stress = _FakeStress(tle_codes={_SLOW})
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
+
+    prompts = _first_pass_prompts(llm)
+    assert len(prompts) == 2
+    assert STRESS_TLE_FEEDBACK in prompts[1]
+    assert result.attempts == 2
+    assert result.log.fixed_code == _SMALL_RIGHT
+    assert result.stress.status == STRESS_OK
+    assert stress.calls == [_SLOW, _SMALL_RIGHT]
+
+
+def test_stress_tle_retries_count_toward_the_retry_limit(db):
+    llm = _FakeLLMWithChecks([(_SLOW, 1e6)] * 3)
+    stress = _FakeStress(tle_codes={_SLOW})
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
+
+    assert len(_first_pass_prompts(llm)) == 3  # 1 回目 + やり直し 2 回で打ち切り
+    assert result.stress.status == STRESS_TLE
+    assert any("最大サイズの入力" in w and "終わりませんでした" in w for w in result.warnings)
+
+
+def test_skipped_stress_check_is_warned_and_not_retried(db):
+    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, 1e6)])
+
+    def broken(code, generator, time_limit):
+        return StressCheck(STRESS_SKIPPED, "CPython", 10.0, note="入力を作るコードの出力が空でした")
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", stress_runner=broken)
+
+    assert len(_first_pass_prompts(llm)) == 1
+    assert any("最大サイズの入力での確認を飛ばしました" in w for w in result.warnings)
+
+
+def test_run_stress_detects_time_limit_exceeded():
+    check = run_stress("while True:\n    pass\n", _GEN, problem_time_limit=0.1)
+    assert check.status == STRESS_TLE
+
+
+def test_run_stress_skips_when_generator_fails():
+    check = run_stress(_SMALL_RIGHT, "raise SystemExit(1)\n", problem_time_limit=0.5)
+    assert check.status == STRESS_SKIPPED
+
+
+def test_too_many_estimated_ops_is_rebuilt_without_running(db):
+    llm = _FakeLLMWithChecks([(_SLOW, OPS_LIMIT * 20), (_SMALL_RIGHT, 1e6)])
+    stress = _FakeStress()
+    ran: list[str] = []
+
+    def runner(code, samples):
+        ran.append(code)
+        return run_samples(code, samples)
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", runner=runner, stress_runner=stress)
+
+    prompts = _first_pass_prompts(llm)
+    assert len(prompts) == 2
+    assert "計算回数の目安" in prompts[1] and "10^8" in prompts[1]
+    assert ran == [_SMALL_RIGHT]          # 目安が多すぎる案は実行していない
+    assert stress.calls == [_SMALL_RIGHT]
+    assert result.log.fixed_code == _SMALL_RIGHT
+
+
+def test_too_many_estimated_ops_until_limit_is_warned(db):
+    llm = _FakeLLMWithChecks([(_SLOW, OPS_LIMIT * 20)] * 3)
+    stress = _FakeStress()
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
+
+    assert len(_first_pass_prompts(llm)) == 3
+    assert stress.calls == []
+    assert result.stress is None
+    assert any("10^8 を大きく超えたまま" in w for w in result.warnings)
+
+
+def test_estimated_ops_within_limit_is_run(db):
+    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, OPS_LIMIT)])
+    stress = _FakeStress()
+
+    explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", stress_runner=stress)
+
+    assert len(_first_pass_prompts(llm)) == 1
+    assert stress.calls == [_SMALL_RIGHT]
+
+
+# ---------------------------------------------------------------------------
+# 修正版を提出した結果を戻したときの記録の扱い
+# ---------------------------------------------------------------------------
+
+def test_submit_ac_marks_log_confirmed(db):
+    log = save_mistake_log(db, **_log_kwargs())
+
+    record_submit_result(db, log, "AC")
+
+    stored = db.get(MistakeLog, log.id)
+    assert stored.fix_status == FIX_CONFIRMED
+    assert stored.submitted_verdict == "AC"
+    assert count_past_same_type(db, "境界・インデックス") == 1  # 確認済みは数える
+    with pytest.raises(TutorError):
+        record_submit_result(db, log, "WA")
+
+
+def test_submit_failure_marks_log_failed_and_excludes_it_from_count(db):
+    save_mistake_log(db, **_log_kwargs(problem_id="abc001_c"))
+    log = save_mistake_log(db, **_log_kwargs(problem_id="abc002_c"))
+    assert count_past_same_type(db, "境界・インデックス") == 2
+
+    record_submit_result(db, log, "TLE")
+
+    assert db.get(MistakeLog, log.id).fix_status == FIX_FAILED
+    assert db.get(MistakeLog, log.id).submitted_verdict == "TLE"
+    assert count_past_same_type(db, "境界・インデックス") == 1
+
+
+def test_submit_failure_rebuilds_fix_with_the_result(db):
+    first = explain(db, _FakeLLMWithChecks([(_SLOW, 1e6)], mistake_type="計算量の見積もりミス"),
+                    None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=_FakeStress())
+    record_submit_result(db, first.log, "TLE")
+
+    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, 1e6)], mistake_type="計算量の見積もりミス")
+    second = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="",
+                     stress_runner=_FakeStress(), retry_of=first.log)
+
+    prompt = _first_pass_prompts(llm)[0]
+    assert "前回の修正版を AtCoder に提出したところ TLE" in prompt
+    assert _SLOW.strip() in prompt                      # 前回の修正版を見せている
+    assert second.log.retry_of_id == first.log.id
+    assert second.log.fix_status is None                # 新しい修正版は提出での確認はまだ
+    assert second.past_same_type_count == 0             # 修正失敗の記録は数えない
+    assert db.get(MistakeLog, first.log.id).fix_status == FIX_FAILED
+    with pytest.raises(TutorError):                     # 作り直し済みなら記録し直せない
+        record_submit_result(db, first.log, "TLE")
+
+
+def test_submit_failure_can_retry_rebuild_when_previous_rebuild_failed(db):
+    log = save_mistake_log(db, **_log_kwargs())
+    record_submit_result(db, log, "WA")
+
+    # 作り直しが失敗して新しい記録がなければ、同じ結果でもう一度選べる（違う結果は不可）
+    assert record_submit_result(db, log, "WA").fix_status == FIX_FAILED
+    with pytest.raises(TutorError):
+        record_submit_result(db, log, "TLE")

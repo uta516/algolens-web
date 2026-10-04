@@ -1,11 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.database import Base, engine
+from app.core.database import Base, add_missing_columns, engine
 from app.routers import analysis, knowledge, problems, review, submissions, sync, tutor, users
 
 # テーブルを自動作成（Alembicに移行するまでの暫定）
 Base.metadata.create_all(bind=engine)
+add_missing_columns(engine)
 
 app = FastAPI(
     title="AlgoLens API",

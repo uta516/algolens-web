@@ -1,4 +1,6 @@
-"""POST /tutor/explain: 提出コードから最小修正・ずれの解説・似た問題を返す。"""
+"""POST /tutor/explain: 提出コードから最小修正・ずれの解説・似た問題を返す。
+POST /tutor/logs/{log_id}/submit-result: 修正版を提出した結果を記録し、AC 以外なら作り直す。
+"""
 
 import logging
 import time
@@ -10,11 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.routers.knowledge import _call_gemini, _gemini_client, _parse_json
-from app.schemas.tutor import ExplainRequest, ExplainResponse
+from app.models.mistake_log import FIX_CONFIRMED, MistakeLog
+from app.schemas.tutor import ExplainRequest, ExplainResponse, SubmitResultRequest, SubmitResultResponse
 from app.services.contests import UNKNOWN_MESSAGE, find_contest, finished_error
 from app.services.editorial_chunker import get_problem_body_text
-from app.services.review import tutor_result_to_dict
-from app.services.tutor import Generate, TutorError, explain, load_problem
+from app.services.review import tutor_result_to_dict, update_report_after_submit
+from app.services.tutor import Generate, TutorError, explain, load_problem, record_submit_result
 
 router = APIRouter(prefix="/tutor", tags=["tutor"])
 logger = logging.getLogger(__name__)
@@ -122,3 +125,48 @@ def explain_submission(req: ExplainRequest, db: Session = Depends(get_db)):
     except TutorError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return ExplainResponse(**tutor_result_to_dict(result))
+
+
+@router.post("/logs/{log_id}/submit-result", response_model=SubmitResultResponse)
+def submit_result(log_id: int, req: SubmitResultRequest, db: Session = Depends(get_db)):
+    """修正版を提出した結果を記録する。AC 以外なら、その結果を伝えて修正版を作り直す。"""
+    log = db.get(MistakeLog, log_id)
+    if log is None:
+        raise HTTPException(status_code=404, detail=f"記録 {log_id} がありません")
+    try:
+        record_submit_result(db, log, req.verdict)
+    except TutorError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    if log.fix_status == FIX_CONFIRMED:
+        update_report_after_submit(db, log, None)
+        return SubmitResultResponse(
+            log_id=log.id, fix_status=log.fix_status, submitted_verdict=log.submitted_verdict, result=None
+        )
+
+    problem = load_problem(log.problem_id)
+    if problem is None:
+        raise HTTPException(status_code=404, detail=f"{log.problem_id} の問題データがありません")
+    generate, generate_first = gemini_generators(_gemini_client())
+    try:
+        result = explain(
+            db,
+            generate,
+            _searcher(),
+            problem,
+            log.original_code,
+            log.verdict,
+            body_text=get_problem_body_text(log.problem_id),
+            username=req.username,
+            generate_first=generate_first,
+            retry_of=log,
+        )
+    except TutorError as e:
+        # 提出結果（修正失敗）は記録済み。同じ結果を選び直すと作り直しだけやり直せる
+        raise HTTPException(status_code=502, detail=f"提出結果は記録しましたが、作り直しに失敗しました: {e}")
+    payload = tutor_result_to_dict(result)
+    update_report_after_submit(db, log, payload)
+    return SubmitResultResponse(
+        log_id=log.id, fix_status=log.fix_status, submitted_verdict=log.submitted_verdict,
+        result=ExplainResponse(**payload),
+    )

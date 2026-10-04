@@ -30,6 +30,15 @@ class SimilarProblemOut(BaseModel):
     url: str
 
 
+class StressOut(BaseModel):
+    status: str  # ok / TLE / skipped
+    interpreter: str
+    time_limit: float
+    seconds: float | None
+    input_bytes: int
+    note: str
+
+
 class ExplainResponse(BaseModel):
     log_id: int
     created_at: datetime
@@ -53,3 +62,23 @@ class ExplainResponse(BaseModel):
     reference: list[SimilarProblemOut]
     next_problems: list[SimilarProblemOut]
     warnings: list[str]
+    complexity: str
+    estimated_ops: float | None
+    stress: StressOut | None
+    fix_status: str | None
+    submitted_verdict: str | None
+    retry_of_id: int | None
+
+
+class SubmitResultRequest(BaseModel):
+    # 修正版を AtCoder に提出した判定
+    verdict: Literal["AC", "WA", "TLE", "RE"]
+    username: str | None = None
+
+
+class SubmitResultResponse(BaseModel):
+    log_id: int
+    fix_status: str
+    submitted_verdict: str
+    # AC 以外のときに作り直した結果
+    result: ExplainResponse | None
