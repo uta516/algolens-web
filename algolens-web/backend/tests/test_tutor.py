@@ -229,10 +229,38 @@ def test_sample_check_first_failure_none_when_passed():
 
 
 # ---------------------------------------------------------------------------
-# やり直しと分岐の通し確認（LLM・検索は偽物）
+# やり直しと分岐の通し確認（LLM・検索・確認の実行は偽物）
 # ---------------------------------------------------------------------------
 
-from app.services.tutor import ProblemData, explain  # noqa: E402
+from app.models.mistake_log import FIX_CONFIRMED, FIX_FAILED  # noqa: E402
+from app.services.checkers import (  # noqa: E402
+    BRUTE_OK,
+    BruteCases,
+    MemoryCheckerStore,
+    ProblemCheckers,
+    compare_with_brute,
+    prepare_brute_cases,
+)
+from app.services.redpen import EditError, apply_edits, parse_edits  # noqa: E402
+from app.services.tutor import (  # noqa: E402
+    CHECK_BRUTE,
+    CHECK_EDITS,
+    CHECK_OPS,
+    CHECK_SAMPLES,
+    CHECK_STRESS,
+    OPS_LIMIT,
+    STRESS_OK,
+    STRESS_SKIPPED,
+    STRESS_TLE,
+    STRESS_TLE_FEEDBACK,
+    Checks,
+    ProblemData,
+    StressCheck,
+    TutorError,
+    explain,
+    record_submit_result,
+    run_stress,
+)
 
 _PROBLEM = ProblemData(
     problem_id="abc999_c",
@@ -242,126 +270,116 @@ _PROBLEM = ProblemData(
     samples=[{"input": "1 2\n", "output": "3\n"}],
 )
 _ORIGINAL = "a, b = map(int, input().split())\nprint(a * b)\n"
+_GEN = "print('1 2')\n"
+_RIGHT_LINE = "print(a + b)"
+_SLOW_LINE = "print(sum([a, b]))"   # 正しいが、最大サイズの入力で時間切れになる想定
+_WRONG_LINE = "print(a - b)"
+
+
+def _fixed(line: str) -> str:
+    return f"a, b = map(int, input().split())\n{line}\n"
+
+
+def _edit(line_text: str, ops: float = 1e6, **extra) -> dict:
+    """2 行目を line_text に置き換える赤ペンの応答。"""
+    return {
+        "edits": [{"line": 2, "action": "replace", "original": "print(a * b)", "new": line_text, "reason": "直す"}],
+        "estimated_ops": ops,
+    } | extra
 
 
 class _FakeLLM:
-    def __init__(self, fixes: list[str]):
-        self.fixes = fixes
+    """1 回目の応答を順に返す偽物（分析項目は共通）。最終解説には決まった文を返す。"""
+
+    def __init__(self, responses: list[dict], mistake_type: str = "読み違い"):
+        self.responses = responses
+        self.mistake_type = mistake_type
         self.prompts: list[str] = []
+        self.schemas: list[dict] = []
 
     def __call__(self, prompt: str, schema: dict) -> dict:
         self.prompts.append(prompt)
+        self.schemas.append(schema)
         if "explanation" in schema["properties"]:
             return {"explanation": "解説"}
         return {
-            "fixed_code": self.fixes.pop(0),
             "gap_summary": "掛け算していた",
-            "mistake_type": "読み違い",
+            "mistake_type": self.mistake_type,
             "lesson": "演算子を確認する",
             "correct_idea": "足し算する",
-        }
-
-
-def test_explain_retries_until_samples_pass_and_saves_log(db):
-    wrong = _ORIGINAL.replace("*", "-")
-    right = _ORIGINAL.replace("*", "+")
-    llm = _FakeLLM([wrong, right])
-
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
-
-    assert result.attempts == 2
-    assert "サンプル 1 が WA" in llm.prompts[1]  # 失敗内容を次の依頼に渡している
-    assert result.log.samples_passed is True
-    assert result.log.mistake_level == "書き方"
-    assert result.log.diff_lines == 1
-    assert db.get(MistakeLog, result.log.id).fixed_code == right
-
-
-def test_explain_gives_up_after_max_retries_and_marks_thinking_mistake(db):
-    wrong = _ORIGINAL.replace("*", "-")
-    llm = _FakeLLM([wrong, wrong, wrong])
-
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
-
-    assert result.attempts == 3
-    assert result.log.samples_passed is False
-    assert result.log.mistake_level == "考え方"
-    assert any("サンプルを通りませんでした" in w for w in result.warnings)
-
-
-# ---------------------------------------------------------------------------
-# サンプルは通ったが変更が大きすぎるときのやり直し
-# ---------------------------------------------------------------------------
-
-from app.services.tutor import TOO_LARGE_FEEDBACK  # noqa: E402
-
-_SMALL_RIGHT = _ORIGINAL.replace("*", "+")
-# サンプルは通るが、元の 2 行に対して 5 行変わる書き直し
-_LARGE_RIGHT = (
-    "import sys\n"
-    "def main():\n"
-    "    x, y = map(int, sys.stdin.readline().split())\n"
-    "    print(x + y)\n"
-    "main()\n"
-)
-_LARGE_RIGHT_2 = _LARGE_RIGHT.replace("x, y", "p, q").replace("x + y", "p + q")
+            "complexity": "O(1)",
+        } | self.responses.pop(0)
 
 
 def _first_pass_prompts(llm: _FakeLLM) -> list[str]:
     return [p for p in llm.prompts if "explanation:" not in p]
 
 
-def test_large_fix_is_retried_once_and_smaller_fix_is_adopted(db):
-    llm = _FakeLLM([_LARGE_RIGHT, _SMALL_RIGHT])
+class _FakeStress:
+    """修正コードごとに決めた結果を返す（指定がなければ 0.1 秒で通る）。"""
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+    def __init__(self, tle_codes=frozenset()):
+        self.tle_codes = set(tle_codes)
+        self.calls: list[str] = []
 
-    prompts = _first_pass_prompts(llm)
-    assert len(prompts) == 2
-    assert TOO_LARGE_FEEDBACK in prompts[1]
+    def __call__(self, code: str, generators: list[str], time_limit: float) -> StressCheck:
+        self.calls.append(code)
+        if code in self.tle_codes:
+            return StressCheck(STRESS_TLE, "CPython", time_limit * 5)
+        return StressCheck(STRESS_OK, "CPython", time_limit * 5, seconds=0.1, input_bytes=10, inputs=1)
+
+
+def _checks(stress=None, brute: bool = False, **kwargs) -> Checks:
+    """最大サイズの入力を作るコード（と、brute なら愚直解）を保存済みにした確認。"""
+    store = MemoryCheckerStore()
+    checkers = ProblemCheckers(max_generators=[_GEN])
+    if brute:
+        checkers.brute_code = "a, b = map(int, input().split())\nprint(a + b)\n"
+        checkers.small_generator = "print('2 5')\n"
+    store.save(_PROBLEM.problem_id, checkers)
+    defaults = dict(
+        stress=stress or _FakeStress(),
+        prepare_brute=lambda b, s: BruteCases([("2 5\n", "7\n")]),
+        store=store,
+    )
+    return Checks(**(defaults | kwargs))
+
+
+def test_explain_retries_until_samples_pass_and_saves_log(db):
+    llm = _FakeLLM([_edit(_WRONG_LINE), _edit(_RIGHT_LINE)])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks())
+
     assert result.attempts == 2
-    assert result.log.fixed_code == _SMALL_RIGHT
-    assert result.log.diff_lines == 1
+    assert "サンプル 1 が WA" in llm.prompts[1]  # 失敗内容を次の依頼に渡している
+    assert "前回の赤ペン" in llm.prompts[1]
+    assert result.fix_found is True
+    assert result.log.samples_passed is True
     assert result.log.mistake_level == "書き方"
+    assert result.log.diff_lines == 1
+    assert db.get(MistakeLog, result.log.id).fixed_code == _fixed(_RIGHT_LINE)
+    assert [a.failed for a in result.attempt_log] == [CHECK_SAMPLES, None]
 
 
-def test_large_fix_stays_thinking_mistake_when_retry_is_still_large(db):
-    llm = _FakeLLM([_LARGE_RIGHT, _LARGE_RIGHT_2])
+def test_fix_not_found_after_max_retries_is_thinking_mistake(db):
+    llm = _FakeLLM([_edit(_WRONG_LINE)] * 3)
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks())
 
-    assert len(_first_pass_prompts(llm)) == 2  # やり直しは 1 回だけ
-    assert result.attempts == 2
-    assert result.log.fixed_code == _LARGE_RIGHT
-    assert result.log.samples_passed is True
+    assert result.attempts == 3
+    assert result.fix_found is False
+    assert result.log.fix_found is False
     assert result.log.mistake_level == "考え方"
-
-
-def test_large_fix_is_kept_when_retry_fails_samples(db):
-    wrong = _ORIGINAL.replace("*", "-")
-    llm = _FakeLLM([_LARGE_RIGHT, wrong])
-
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
-
-    assert result.log.fixed_code == _LARGE_RIGHT
-    assert result.log.samples_passed is True
-    assert result.log.mistake_level == "考え方"
-
-
-def test_small_fix_is_not_retried(db):
-    llm = _FakeLLM([_SMALL_RIGHT])
-
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="")
-
-    assert len(_first_pass_prompts(llm)) == 1
-    assert result.attempts == 1
+    assert "少ない修正（赤ペン）では確認を通せませんでした" in llm.prompts[-1]
+    with pytest.raises(TutorError):  # 提出する修正版がないので、提出結果は戻せない
+        record_submit_result(db, result.log, "WA")
 
 
 def test_first_pass_uses_generate_first_when_given(db):
-    first = _FakeLLM([_SMALL_RIGHT])
+    first = _FakeLLM([_edit(_RIGHT_LINE)])
     other = _FakeLLM([])
 
-    explain(db, other, None, _PROBLEM, _ORIGINAL, "WA", body_text="", generate_first=first)
+    explain(db, other, None, _PROBLEM, _ORIGINAL, "WA", body_text="", generate_first=first, checks=_checks())
 
     assert len(first.prompts) == 1
     assert len(other.prompts) == 1  # 最終解説だけ
@@ -369,118 +387,221 @@ def test_first_pass_uses_generate_first_when_given(db):
 
 
 # ---------------------------------------------------------------------------
+# 赤ペン（変更の一覧）とコメント・空行
+# ---------------------------------------------------------------------------
+
+_COMMENTED = "# テンプレート\n#   N = int(input())\n\na, b = map(int, input().split())\n\nprint(a * b)  # 出力\n"
+
+
+def test_apply_edits_keeps_comments_and_blank_lines():
+    edits = parse_edits([
+        {"line": 6, "action": "replace", "original": "print(a * b)  # 出力", "new": "print(a + b)  # 出力", "reason": ""},
+        {"line": 0, "action": "insert_after", "original": "", "new": "import sys", "reason": ""},
+        {"line": 4, "action": "insert_after", "original": "", "new": "c = 0\nd = 0", "reason": ""},
+    ])
+    fixed = apply_edits(_COMMENTED, edits)
+    assert fixed == (
+        "import sys\n# テンプレート\n#   N = int(input())\n\na, b = map(int, input().split())\nc = 0\nd = 0\n\n"
+        "print(a + b)  # 出力\n"
+    )
+
+
+def test_apply_edits_rejects_wrong_original_and_delete():
+    with pytest.raises(EditError, match="合いません"):
+        apply_edits(_ORIGINAL, parse_edits([{"line": 1, "action": "replace", "original": "print(a * b)", "new": "x", "reason": ""}]))
+    edits = parse_edits([{"line": 2, "action": "delete", "original": "print(a * b)", "new": "", "reason": ""}])
+    assert apply_edits(_ORIGINAL, edits) == "a, b = map(int, input().split())\n"
+
+
+def test_compute_diff_ignores_comment_and_blank_lines():
+    fixed = "a, b = map(int, input().split())\nprint(a + b)\n"
+    _, changed, total = compute_diff(_COMMENTED, fixed)  # コメント・空行の削除は数えない
+    assert total == 2
+    assert changed == 1
+
+
+def test_edits_that_do_not_match_code_are_retried(db):
+    bad = {"edits": [{"line": 1, "action": "replace", "original": "print(a * b)", "new": _RIGHT_LINE, "reason": ""}],
+           "estimated_ops": 1}
+    llm = _FakeLLM([bad, _edit(_RIGHT_LINE)])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks())
+
+    assert [a.failed for a in result.attempt_log] == [CHECK_EDITS, None]
+    assert "original が元のコードと合いません" in _first_pass_prompts(llm)[1]
+    assert result.log.fixed_code == _fixed(_RIGHT_LINE)
+
+
+def test_comment_lines_in_original_are_kept_in_fixed_code(db):
+    edit = {"edits": [{"line": 6, "action": "replace", "original": "print(a * b)  # 出力",
+                       "new": "print(a + b)  # 出力", "reason": ""}], "estimated_ops": 1}
+    llm = _FakeLLM([edit])
+
+    result = explain(db, llm, None, _PROBLEM, _COMMENTED, "WA", body_text="", checks=_checks())
+
+    assert result.log.fixed_code.startswith("# テンプレート\n#   N = int(input())\n\n")
+    assert result.log.diff_lines == 1
+    assert result.total_lines == 2
+
+
+# ---------------------------------------------------------------------------
+# 愚直解との比較
+# ---------------------------------------------------------------------------
+
+def test_brute_mismatch_is_retried_and_logged(db):
+    # サンプル (1 2 → 3) は通るが、小さい入力 (2 5 → 7) で答えが違う
+    llm = _FakeLLM([_edit("print(3)"), _edit(_RIGHT_LINE)])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks(brute=True))
+
+    assert [a.failed for a in result.attempt_log] == [CHECK_BRUTE, None]
+    assert "愚直解" in _first_pass_prompts(llm)[1] and "2 5" in _first_pass_prompts(llm)[1]
+    assert result.brute.status == BRUTE_OK
+    assert result.log.fixed_code == _fixed(_RIGHT_LINE)
+
+
+def test_prepare_and_compare_with_brute_runs_real_code():
+    brute = "a, b = map(int, input().split())\nprint(a + b)\n"
+    gen = "import random, sys\nrandom.seed(int(sys.argv[1]))\nprint(random.randint(1, 9), random.randint(1, 9))\n"
+    cases = prepare_brute_cases(brute, gen, n=3)
+    assert cases.note == "" and len(cases.cases) == 3
+    assert compare_with_brute(brute, cases).status == BRUTE_OK
+    check = compare_with_brute("print(0)\n", cases)
+    assert check.status == "mismatch" and check.failure.status == "WA"
+
+
+def test_checkers_are_saved_and_not_requested_again(db):
+    store = MemoryCheckerStore()
+    checks = Checks(stress=_FakeStress(), check_generator=lambda g: "", store=store,
+                    prepare_brute=lambda b, s: BruteCases([("2 5\n", "7\n")]))
+    brute = {"brute_code": "a, b = map(int, input().split())\nprint(a + b)\n",
+             "small_input_generator": "print('2 5')\n", "max_input_generators": [_GEN]}
+    first = _FakeLLM([_edit(_RIGHT_LINE, **brute)])
+
+    explain(db, first, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=checks)
+
+    assert "brute_code" in first.schemas[0]["properties"]
+    saved = store.load(_PROBLEM.problem_id)
+    assert saved.has_brute and saved.max_generators == [_GEN]
+
+    second = _FakeLLM([_edit(_RIGHT_LINE)])
+    result = explain(db, second, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=checks)
+
+    props = second.schemas[0]["properties"]
+    assert "brute_code" not in props and "max_input_generators" not in props
+    assert result.brute.status == BRUTE_OK
+
+
+def test_brute_that_fails_samples_is_not_saved(db):
+    store = MemoryCheckerStore()
+    checks = Checks(stress=_FakeStress(), check_generator=lambda g: "", store=store)
+    llm = _FakeLLM([_edit(_RIGHT_LINE, brute_code="print(0)\n", small_input_generator="print('2 5')\n",
+                          max_input_generators=[_GEN])])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=checks)
+
+    assert not store.load(_PROBLEM.problem_id).has_brute
+    assert result.brute is None
+    assert any("愚直解がサンプルを通らなかった" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 別解
+# ---------------------------------------------------------------------------
+
+def test_alternative_is_shown_only_when_checks_pass(db):
+    alt = "print(sum(map(int, input().split())))\n"
+    llm = _FakeLLM([_edit(_RIGHT_LINE, alternative_code=alt, alternative_complexity="O(1)",
+                          alternative_reason="1 行で書ける")])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks())
+
+    assert result.alternative is not None and result.alternative.code == alt
+    assert result.log.fixed_code == _fixed(_RIGHT_LINE)  # 別解は赤ペンの代わりにしない
+
+
+def test_alternative_that_fails_is_hidden(db):
+    slow_alt = "print(sum(map(int, input().split())))  # slow\n"
+    llm = _FakeLLM([_edit(_RIGHT_LINE, alternative_code=slow_alt)])
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="",
+                     checks=_checks(stress=_FakeStress(tle_codes={slow_alt})))
+
+    assert result.alternative is None
+    assert any("別解はありましたが" in w for w in result.warnings)
+
+
+def test_alternative_is_asked_only_in_first_call(db):
+    llm = _FakeLLM([_edit(_WRONG_LINE), _edit(_RIGHT_LINE)])
+
+    explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks())
+
+    assert "alternative_code" in llm.schemas[0]["properties"]
+    assert "alternative_code" not in llm.schemas[1]["properties"]
+
+
+# ---------------------------------------------------------------------------
 # 最大サイズの入力での時間切れ・計算回数の目安によるやり直し
 # ---------------------------------------------------------------------------
 
-from app.models.mistake_log import FIX_CONFIRMED, FIX_FAILED  # noqa: E402
-from app.services.tutor import (  # noqa: E402
-    OPS_LIMIT,
-    STRESS_OK,
-    STRESS_SKIPPED,
-    STRESS_TLE,
-    STRESS_TLE_FEEDBACK,
-    StressCheck,
-    TutorError,
-    count_past_same_type,
-    record_submit_result,
-    run_stress,
-)
-
-_GEN = "print('1 2')\n"
-
-
-class _FakeLLMWithChecks:
-    """1 回目の応答ごとに (修正コード, 計算回数の目安) を返す偽物。"""
-
-    def __init__(self, fixes: list[tuple[str, float]], mistake_type: str = "読み違い"):
-        self.fixes = fixes
-        self.mistake_type = mistake_type
-        self.prompts: list[str] = []
-
-    def __call__(self, prompt: str, schema: dict) -> dict:
-        self.prompts.append(prompt)
-        if "explanation" in schema["properties"]:
-            return {"explanation": "解説"}
-        code, ops = self.fixes.pop(0)
-        return {
-            "fixed_code": code,
-            "gap_summary": "掛け算していた",
-            "mistake_type": self.mistake_type,
-            "lesson": "演算子を確認する",
-            "correct_idea": "足し算する",
-            "complexity": "O(1)",
-            "estimated_ops": ops,
-            "max_input_generator": _GEN,
-        }
-
-
-class _FakeStress:
-    """修正コードごとに決めた結果を返す（指定がなければ 0.1 秒で通る）。"""
-
-    def __init__(self, tle_codes: set[str] = frozenset()):
-        self.tle_codes = tle_codes
-        self.calls: list[str] = []
-
-    def __call__(self, code: str, generator: str, time_limit: float) -> StressCheck:
-        self.calls.append(code)
-        if code in self.tle_codes:
-            return StressCheck(STRESS_TLE, "CPython", time_limit * 5)
-        return StressCheck(STRESS_OK, "CPython", time_limit * 5, seconds=0.1, input_bytes=10)
-
-
-_SLOW = _SMALL_RIGHT + "# slow\n"  # サンプルは通るが、最大サイズの入力で時間切れになる想定
-
-
 def test_stress_tle_asks_to_improve_complexity_and_retries(db):
-    llm = _FakeLLMWithChecks([(_SLOW, 1e6), (_SMALL_RIGHT, 1e6)])
-    stress = _FakeStress(tle_codes={_SLOW})
+    llm = _FakeLLM([_edit(_SLOW_LINE), _edit(_RIGHT_LINE)])
+    stress = _FakeStress(tle_codes={_fixed(_SLOW_LINE)})
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", checks=_checks(stress))
 
     prompts = _first_pass_prompts(llm)
     assert len(prompts) == 2
     assert STRESS_TLE_FEEDBACK in prompts[1]
-    assert result.attempts == 2
-    assert result.log.fixed_code == _SMALL_RIGHT
+    assert [a.failed for a in result.attempt_log] == [CHECK_STRESS, None]
+    assert result.log.fixed_code == _fixed(_RIGHT_LINE)
     assert result.stress.status == STRESS_OK
-    assert stress.calls == [_SLOW, _SMALL_RIGHT]
+    assert stress.calls == [_fixed(_SLOW_LINE), _fixed(_RIGHT_LINE)]
 
 
 def test_stress_tle_retries_count_toward_the_retry_limit(db):
-    llm = _FakeLLMWithChecks([(_SLOW, 1e6)] * 3)
-    stress = _FakeStress(tle_codes={_SLOW})
+    llm = _FakeLLM([_edit(_SLOW_LINE)] * 3)
+    stress = _FakeStress(tle_codes={_fixed(_SLOW_LINE)})
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", checks=_checks(stress))
 
     assert len(_first_pass_prompts(llm)) == 3  # 1 回目 + やり直し 2 回で打ち切り
     assert result.stress.status == STRESS_TLE
-    assert any("最大サイズの入力" in w and "終わりませんでした" in w for w in result.warnings)
+    assert result.fix_found is False
+    assert [a.failed for a in result.attempt_log] == [CHECK_STRESS] * 3
 
 
 def test_skipped_stress_check_is_warned_and_not_retried(db):
-    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, 1e6)])
-
-    def broken(code, generator, time_limit):
+    def broken(code, generators, time_limit):
         return StressCheck(STRESS_SKIPPED, "CPython", 10.0, note="入力を作るコードの出力が空でした")
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", stress_runner=broken)
+    llm = _FakeLLM([_edit(_RIGHT_LINE)])
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks(broken))
 
     assert len(_first_pass_prompts(llm)) == 1
+    assert result.fix_found is True
     assert any("最大サイズの入力での確認を飛ばしました" in w for w in result.warnings)
 
 
 def test_run_stress_detects_time_limit_exceeded():
-    check = run_stress("while True:\n    pass\n", _GEN, problem_time_limit=0.1)
+    check = run_stress("while True:\n    pass\n", [_GEN], problem_time_limit=0.1)
     assert check.status == STRESS_TLE
 
 
 def test_run_stress_skips_when_generator_fails():
-    check = run_stress(_SMALL_RIGHT, "raise SystemExit(1)\n", problem_time_limit=0.5)
+    check = run_stress(_fixed(_RIGHT_LINE), ["raise SystemExit(1)\n"], problem_time_limit=0.5)
     assert check.status == STRESS_SKIPPED
 
 
+def test_run_stress_uses_every_generator_and_skips_broken_ones():
+    check = run_stress(_fixed(_RIGHT_LINE), [_GEN, "raise SystemExit(1)\n", "print('3 4')\n"], problem_time_limit=0.5)
+    assert check.status == STRESS_OK
+    assert check.inputs == 2
+    assert "入力 2" in check.note
+
+
 def test_too_many_estimated_ops_is_rebuilt_without_running(db):
-    llm = _FakeLLMWithChecks([(_SLOW, OPS_LIMIT * 20), (_SMALL_RIGHT, 1e6)])
+    llm = _FakeLLM([_edit(_SLOW_LINE, ops=OPS_LIMIT * 20), _edit(_RIGHT_LINE)])
     stress = _FakeStress()
     ran: list[str] = []
 
@@ -488,36 +609,24 @@ def test_too_many_estimated_ops_is_rebuilt_without_running(db):
         ran.append(code)
         return run_samples(code, samples)
 
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", runner=runner, stress_runner=stress)
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", checks=_checks(stress, runner=runner))
 
     prompts = _first_pass_prompts(llm)
     assert len(prompts) == 2
     assert "計算回数の目安" in prompts[1] and "10^8" in prompts[1]
-    assert ran == [_SMALL_RIGHT]          # 目安が多すぎる案は実行していない
-    assert stress.calls == [_SMALL_RIGHT]
-    assert result.log.fixed_code == _SMALL_RIGHT
-
-
-def test_too_many_estimated_ops_until_limit_is_warned(db):
-    llm = _FakeLLMWithChecks([(_SLOW, OPS_LIMIT * 20)] * 3)
-    stress = _FakeStress()
-
-    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=stress)
-
-    assert len(_first_pass_prompts(llm)) == 3
-    assert stress.calls == []
-    assert result.stress is None
-    assert any("10^8 を大きく超えたまま" in w for w in result.warnings)
+    assert ran == [_fixed(_RIGHT_LINE)]     # 目安が多すぎる案は実行していない
+    assert stress.calls == [_fixed(_RIGHT_LINE)]
+    assert [a.failed for a in result.attempt_log] == [CHECK_OPS, None]
 
 
 def test_estimated_ops_within_limit_is_run(db):
-    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, OPS_LIMIT)])
+    llm = _FakeLLM([_edit(_RIGHT_LINE, ops=OPS_LIMIT)])
     stress = _FakeStress()
 
-    explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", stress_runner=stress)
+    explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks(stress))
 
     assert len(_first_pass_prompts(llm)) == 1
-    assert stress.calls == [_SMALL_RIGHT]
+    assert stress.calls == [_fixed(_RIGHT_LINE)]
 
 
 # ---------------------------------------------------------------------------
@@ -550,17 +659,17 @@ def test_submit_failure_marks_log_failed_and_excludes_it_from_count(db):
 
 
 def test_submit_failure_rebuilds_fix_with_the_result(db):
-    first = explain(db, _FakeLLMWithChecks([(_SLOW, 1e6)], mistake_type="計算量の見積もりミス"),
-                    None, _PROBLEM, _ORIGINAL, "TLE", body_text="", stress_runner=_FakeStress())
+    first = explain(db, _FakeLLM([_edit(_SLOW_LINE)], mistake_type="計算量の見積もりミス"),
+                    None, _PROBLEM, _ORIGINAL, "TLE", body_text="", checks=_checks())
     record_submit_result(db, first.log, "TLE")
 
-    llm = _FakeLLMWithChecks([(_SMALL_RIGHT, 1e6)], mistake_type="計算量の見積もりミス")
+    llm = _FakeLLM([_edit(_RIGHT_LINE)], mistake_type="計算量の見積もりミス")
     second = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="",
-                     stress_runner=_FakeStress(), retry_of=first.log)
+                     checks=_checks(), retry_of=first.log)
 
     prompt = _first_pass_prompts(llm)[0]
     assert "前回の修正版を AtCoder に提出したところ TLE" in prompt
-    assert _SLOW.strip() in prompt                      # 前回の修正版を見せている
+    assert _SLOW_LINE in prompt                          # 前回の修正版を見せている
     assert second.log.retry_of_id == first.log.id
     assert second.log.fix_status is None                # 新しい修正版は提出での確認はまだ
     assert second.past_same_type_count == 0             # 修正失敗の記録は数えない
@@ -577,3 +686,78 @@ def test_submit_failure_can_retry_rebuild_when_previous_rebuild_failed(db):
     assert record_submit_result(db, log, "WA").fix_status == FIX_FAILED
     with pytest.raises(TutorError):
         record_submit_result(db, log, "TLE")
+
+
+# ---------------------------------------------------------------------------
+# 赤ペンが書き直しになったとき
+# ---------------------------------------------------------------------------
+
+from app.services.tutor import CHECK_SIZE, is_rewrite  # noqa: E402
+
+# 元のコード 8 行（コメント・空行を除く）。2 行目だけ直せば正しい
+_LONG = "a, b = map(int, input().split())\nprint(a * b)\n" + "".join(f"x{i} = {i}\n" for i in range(6))
+
+
+def _rewrite_edits(n: int) -> dict:
+    """2 行目を直し、さらに 3 行目以降の n 行を書き換える赤ペン。"""
+    edits = [{"line": 2, "action": "replace", "original": "print(a * b)", "new": _RIGHT_LINE, "reason": ""}]
+    edits += [{"line": 3 + i, "action": "replace", "original": f"x{i} = {i}", "new": f"y{i} = {i}", "reason": ""}
+              for i in range(n)]
+    return {"edits": edits, "estimated_ops": 1}
+
+
+def test_compute_diff_counts_lines_written_not_lines_removed():
+    original = "if c:\n    if d:\n        print(1)\n    else:\n        print(2)\n"
+    fixed = "if c:\n    print(1)\n"  # 入れ子をほどいて 1 行にまとめた
+    _, changed, total = compute_diff(original, fixed)
+    assert (changed, total) == (1, 5)
+
+
+def test_is_rewrite_when_more_than_half_of_lines_change():
+    assert not is_rewrite(3, 4)       # 3 行以下は小さい直し
+    assert not is_rewrite(4, 8)       # ちょうど半分
+    assert is_rewrite(5, 8)
+
+
+def test_rewrite_is_sent_back_and_smaller_fix_is_adopted(db):
+    llm = _FakeLLM([_rewrite_edits(4), _rewrite_edits(0)])
+
+    result = explain(db, llm, None, _PROBLEM, _LONG, "WA", body_text="", checks=_checks())
+
+    assert [a.failed for a in result.attempt_log] == [CHECK_SIZE, None]
+    assert "変更が大きすぎます" in _first_pass_prompts(llm)[1]
+    assert result.log.diff_lines == 1
+
+
+def test_rewrite_until_limit_means_fix_not_found(db):
+    llm = _FakeLLM([_rewrite_edits(4)] * 3)
+
+    result = explain(db, llm, None, _PROBLEM, _LONG, "WA", body_text="", checks=_checks())
+
+    assert result.fix_found is False
+    assert result.log.mistake_level == "考え方"
+    assert result.sample_cases  # 実行前に止まっても、表示用にサンプルの結果は取る
+
+
+def test_edits_on_blank_or_comment_lines_are_rejected():
+    with pytest.raises(EditError, match="空行かコメント"):
+        apply_edits(_COMMENTED, parse_edits([{"line": 3, "action": "replace", "original": "", "new": "x = 1", "reason": ""}]))
+    with pytest.raises(EditError, match="空行かコメント"):
+        apply_edits(_COMMENTED, parse_edits([{"line": 1, "action": "delete", "original": "# テンプレート", "new": "", "reason": ""}]))
+
+
+def test_no_op_replace_is_ignored():
+    edits = parse_edits([{"line": 1, "action": "replace", "original": "a, b = map(int, input().split())",
+                          "new": "a, b = map(int, input().split())", "reason": ""}])
+    assert apply_edits(_ORIGINAL, edits) == _ORIGINAL
+
+
+def test_counterexample_for_original_code_is_shown_to_llm(db):
+    # 元のコード（掛け算）は保存済みの愚直解の入力 2 5 で 10 を出し、正しい答え 7 と違う
+    llm = _FakeLLM([_edit(_RIGHT_LINE)])
+
+    explain(db, llm, None, _PROBLEM, _ORIGINAL, "WA", body_text="", checks=_checks(brute=True))
+
+    prompt = _first_pass_prompts(llm)[0]
+    assert "私のコードが間違える小さい入力" in prompt
+    assert "2 5" in prompt and "10" in prompt

@@ -49,3 +49,9 @@ class MistakeLog(Base):
     submitted_verdict: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # 「修正失敗」の記録から作り直した場合、その元の記録
     retry_of_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("mistake_logs.id"), nullable=True)
+    # 赤ペン（少ない修正）が全部の確認を通ったか。False なら「少ない修正では直せない」
+    fix_found: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 赤ペンの変更の一覧（JSON: line / action / original / new / reason）
+    edits: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 作り直しの記録（JSON: attempt / failed / detail。failed は落ちた確認、通れば null）
+    attempt_log: Mapped[str | None] = mapped_column(Text, nullable=True)

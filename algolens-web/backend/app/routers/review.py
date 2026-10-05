@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.tutor_report import REPORT_DONE, TutorReport
 from app.routers.knowledge import _gemini_client
-from app.routers.tutor import _searcher, gemini_generators
+from app.routers.tutor import _searcher, file_checks, gemini_generators
 from app.schemas.review import (
     CodeIn,
     ContestOut,
@@ -201,6 +201,7 @@ def process_one(report_id: int, db: Session = Depends(get_db)):
             ),
             prepare_problem=lambda r: prepare_problem_data(client, r, index_editorials),
             body_text=get_problem_body_text,
+            checks=file_checks(),
         )
         process_report(db, report, deps)
     except HTTPException:

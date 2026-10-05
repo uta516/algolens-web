@@ -15,7 +15,7 @@
 
 import calendar
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -45,20 +45,21 @@ from app.services.editorial_scraper import (
     refresh_editorials,
 )
 from app.services.tutor import (
+    ADDRESS_RULE,
+    MAX_GENERATORS_SPEC,
+    STRESS_OK,
+    STRESS_TLE,
+    Checks,
     Generate,
     ProblemData,
-    ADDRESS_RULE,
-    SampleCheck,
     Searcher,
-    StressRunner,
     TutorResult,
+    _absorb_checkers,
     compute_diff,
     explain,
     find_similar,
     load_problem,
     number_lines,
-    run_samples,
-    run_stress,
     split_by_solved,
     _strip_code_fence,
 )
@@ -350,7 +351,16 @@ AC_SCHEMA = {
 }
 
 
-def build_ac_prompt(problem: ProblemData, code: str) -> str:
+def ac_schema(need_max: bool) -> dict:
+    """AC の提案の JSON の形。最大サイズの入力を作るコードが保存済みでなければ一緒に頼む。"""
+    if not need_max:
+        return AC_SCHEMA
+    props = AC_SCHEMA["properties"] | {"max_input_generators": {"type": "ARRAY", "items": {"type": "STRING"}}}
+    return {"type": "OBJECT", "properties": props, "required": [*AC_SCHEMA["required"], "max_input_generators"]}
+
+
+def build_ac_prompt(problem: ProblemData, code: str, need_max: bool = False) -> str:
+    extra = f"\n{MAX_GENERATORS_SPEC}" if need_max else ""
     return f"""AtCoder の家庭教師として答えてください。私の Python 提出コードは AC しました。
 {ADDRESS_RULE}
 次のどちらかに当てはまる、明らかに良い解き方があるかを判断してください。
@@ -374,7 +384,7 @@ def build_ac_prompt(problem: ProblemData, code: str) -> str:
 - better_code: 提案する Python コード全体。標準入力から読み標準出力に書く。コードブロック記号は付けない（なければ空文字）
 - current_review: Markdown で簡潔に、私の今の解き方の評価（良い点と計算量）
 - suggestion_reason: Markdown で簡潔に、提案がどう良くなるか（行番号を指して。なければ空文字）
-- correct_idea: この問題を解く考え方を一文で（使う手法名があれば手法名を含める）
+- correct_idea: この問題を解く考え方を一文で（使う手法名があれば手法名を含める）{extra}
 """
 
 
@@ -416,19 +426,26 @@ def review_accepted(
     code: str,
     body_text: str,
     username: str | None = None,
-    runner: Callable[[str, list[dict]], SampleCheck] = run_samples,
+    checks: Checks | None = None,
 ) -> dict:
     """AC の提出について、基準（計算量が良くなる / 行数が半分以下）を満たす解き方だけを提案する。
 
+    提案はサンプルと最大サイズの入力で確かめ、通ったときだけ出す（愚直解との比較はしない）。
     mistake_logs には保存しない。
     """
+    checks = checks or Checks()
     warnings: list[str] = []
-    data = generate(build_ac_prompt(problem, code), AC_SCHEMA)
+    checkers = checks.store.load(problem.problem_id)
+    need_max = not checkers.max_generators
+    data = generate(build_ac_prompt(problem, code, need_max), ac_schema(need_max))
+    if need_max:
+        _absorb_checkers({"max_input_generators": data.get("max_input_generators")}, problem, checkers, checks, warnings)
     better_code = _strip_code_fence(data.get("better_code") or "").strip()
     correct_idea = (data.get("correct_idea") or "").strip()
 
     suggestion = None
     sample_cases: list = []
+    stress = None
     note = ""
     if data.get("has_better") is True and better_code:
         label = judge_suggestion(
@@ -438,10 +455,15 @@ def review_accepted(
         if label is None:
             note = "提案はありましたが、計算量が良くなる・行数が半分以下のどちらにも当てはまらないため出していません"
         else:
-            check = runner(better_code, problem.samples)
+            check = checks.runner(better_code, problem.samples)
             sample_cases = [asdict(c) for c in check.cases]
+            if checkers.max_generators and check.passed is not False:
+                stress = checks.stress(better_code, checkers.max_generators, problem.time_limit_sec)
             if check.passed is False:
                 note = "提案されたコードがサンプルを通らなかったため、提案はしません"
+            elif stress is None or stress.status != STRESS_OK:
+                reason = "時間切れになった" if stress is not None and stress.status == STRESS_TLE else "確かめられなかった"
+                note = f"提案されたコードが最大サイズの入力で{reason}ため、提案はしません"
             else:
                 if check.passed is None:
                     warnings.append("保存済みのサンプルがないため、提案コードは未確認です")
@@ -454,6 +476,7 @@ def review_accepted(
                     "diff_lines": changed,
                     "total_lines": total,
                     "samples_passed": check.passed,
+                    "stress": asdict(stress),
                 }
 
     similar = find_similar(searcher, problem.problem_id, body_text, correct_idea, warnings) if correct_idea else []
@@ -475,6 +498,24 @@ def review_accepted(
 # ---------------------------------------------------------------------------
 # 1 問の処理
 # ---------------------------------------------------------------------------
+
+def _brute_dict(brute) -> dict | None:
+    if brute is None:
+        return None
+    return {"status": brute.status, "total": brute.total, "matched": brute.matched, "note": brute.note,
+            "failure": asdict(brute.failure) if brute.failure else None}
+
+
+def _alternative_dict(alt, original_code: str) -> dict | None:
+    if alt is None:
+        return None
+    diff, changed, total = compute_diff(original_code, alt.code)
+    return {
+        "code": alt.code, "complexity": alt.complexity, "reason": alt.reason,
+        "sample_cases": [asdict(c) for c in alt.check.cases], "stress": asdict(alt.stress),
+        "diff_lines": changed, "total_lines": total,
+    }
+
 
 def tutor_result_to_dict(result: TutorResult) -> dict:
     """家庭教師の結果を、API レスポンス・保存用の辞書にする。"""
@@ -505,6 +546,11 @@ def tutor_result_to_dict(result: TutorResult) -> dict:
         "complexity": result.complexity,
         "estimated_ops": result.estimated_ops,
         "stress": asdict(result.stress) if result.stress is not None else None,
+        "fix_found": result.fix_found,
+        "edits": [asdict(e) for e in result.edits],
+        "attempt_log": [asdict(a) for a in result.attempt_log],
+        "brute": _brute_dict(result.brute),
+        "alternative": _alternative_dict(result.alternative, log.original_code),
         "fix_status": log.fix_status,
         "submitted_verdict": log.submitted_verdict,
         "retry_of_id": log.retry_of_id,
@@ -541,8 +587,7 @@ class ReviewDeps:
     # 本問の公式解説本文（検索1 のクエリ。Gemini には渡さない）
     body_text: Callable[[str], str]
     generate_first: Generate | None = None
-    runner: Callable[[str, list[dict]], SampleCheck] = run_samples
-    stress_runner: StressRunner = run_stress
+    checks: Checks = field(default_factory=Checks)
 
 
 @dataclass
@@ -593,15 +638,15 @@ def process_report(db: Session, report: TutorReport, deps: ReviewDeps) -> TutorR
         if report.kind == KIND_MISTAKE:
             result = explain(
                 db, generate, deps.searcher, problem, report.original_code, report.verdict,
-                body_text=body_text, username=report.username, runner=deps.runner,
-                generate_first=counter.wrap(deps.generate_first), stress_runner=deps.stress_runner,
+                body_text=body_text, username=report.username,
+                generate_first=counter.wrap(deps.generate_first), checks=deps.checks,
             )
             payload = tutor_result_to_dict(result)
             report.mistake_log_id = result.log.id
         else:
             payload = review_accepted(
                 db, generate, deps.searcher, problem, report.original_code, body_text,
-                username=report.username, runner=deps.runner,
+                username=report.username, checks=deps.checks,
             )
         _finish(db, report, payload, editorial_available=editorial_available, calls=counter.count)
         return report

@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     chroma_dir: str = ""
     # 解答を置くフォルダ（未設定なら AtCorder/submissions/）。<フォルダ>/abc477/c.py の形で置く
     submissions_dir: str = ""
+    # 修正版を最大サイズの入力で測るときの PyPy（未設定なら PATH の pypy3 / pypy、なければ CPython）
+    pypy_path: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -25,7 +25,8 @@ from app.services.review import (
     process_report,
     select_last_submissions,
 )
-from app.services.tutor import ProblemData
+from app.services.checkers import STRESS_OK, STRESS_TLE, MemoryCheckerStore, ProblemCheckers, StressCheck
+from app.services.tutor import Checks, ProblemData
 
 PY = "Python (CPython 3.11.4)"
 
@@ -131,8 +132,23 @@ class _FakeLLM:
             return {"explanation": "解説"}
         if "has_better" in props:
             return _ac_response(has_better=False)
-        return {"fixed_code": _RIGHT, "gap_summary": "掛け算していた", "mistake_type": "読み違い",
-                "lesson": "演算子を確認する", "correct_idea": "足し算する"}
+        return {"edits": [{"line": 2, "action": "replace", "original": "print(a * b)",
+                           "new": "print(a + b)", "reason": "足し算にする"}],
+                "gap_summary": "掛け算していた", "mistake_type": "読み違い",
+                "lesson": "演算子を確認する", "correct_idea": "足し算する",
+                "complexity": "O(1)", "estimated_ops": 1}
+
+
+def _fake_checks() -> Checks:
+    """最大サイズの入力を作るコードは保存済みとし、実行は常に 0.1 秒で通る偽物にする。"""
+    store = MemoryCheckerStore()
+    for pid in ("abc400_a", "abc400_b"):
+        store.save(pid, ProblemCheckers(max_generators=["print('1 2')"]))
+
+    def stress(code, generators, time_limit):
+        return StressCheck(STRESS_OK, "CPython", time_limit * 5, seconds=0.1, inputs=len(generators))
+
+    return Checks(stress=stress, store=store)
 
 
 def _deps(llm, fetched: list | None = None, code: str | None = _ORIGINAL) -> ReviewDeps:
@@ -149,7 +165,7 @@ def _deps(llm, fetched: list | None = None, code: str | None = _ORIGINAL) -> Rev
 
     return ReviewDeps(
         generate=llm, searcher=None, find_code=find_code,
-        prepare_problem=prepare_problem, body_text=lambda pid: "",
+        prepare_problem=prepare_problem, body_text=lambda pid: "", checks=_fake_checks(),
     )
 
 
@@ -430,3 +446,36 @@ def test_gather_syncs_without_warning_when_api_works(db):
     assert gathered.warnings == []
     assert gathered.synced == 4
     assert _count(db, Submission) == 4
+
+
+# ---------------------------------------------------------------------------
+# AC の提案（別解）の確認: サンプルと最大サイズの入力だけ
+# ---------------------------------------------------------------------------
+
+def test_process_ac_does_not_compare_with_brute(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+    deps = _deps(lambda p, s: _ac_response(better_code="print(sum(map(int, input().split())))\n"))
+
+    def no_brute(*args):
+        raise AssertionError("AC の提案では愚直解と比べない")
+
+    deps.checks.prepare_brute = no_brute
+    deps.checks.compare_brute = no_brute
+
+    process_report(db, ac, deps)
+
+    assert json.loads(ac.payload)["suggestion"]["stress"]["status"] == STRESS_OK
+
+
+def test_process_ac_drops_suggestion_that_times_out_on_max_input(db):
+    reports = plan_contest(db, "me", "abc400", _SUBS, _TITLES)
+    ac = next(r for r in reports if r.kind == KIND_AC)
+    deps = _deps(lambda p, s: _ac_response(better_code="print(sum(map(int, input().split())))\n"))
+    deps.checks.stress = lambda code, gens, tl: StressCheck(STRESS_TLE, "CPython", tl * 5)
+
+    process_report(db, ac, deps)
+
+    payload = json.loads(ac.payload)
+    assert payload["suggestion"] is None
+    assert "時間切れ" in payload["note"]

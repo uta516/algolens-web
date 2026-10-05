@@ -17,7 +17,9 @@ from app.schemas.tutor import ExplainRequest, ExplainResponse, SubmitResultReque
 from app.services.contests import UNKNOWN_MESSAGE, find_contest, finished_error
 from app.services.editorial_chunker import get_problem_body_text
 from app.services.review import tutor_result_to_dict, update_report_after_submit
-from app.services.tutor import Generate, TutorError, explain, load_problem, record_submit_result
+from app.services.checkers import FileCheckerStore
+from app.services.editorial_scraper import EDITORIALS_DIR
+from app.services.tutor import Checks, Generate, TutorError, explain, load_problem, record_submit_result
 
 router = APIRouter(prefix="/tutor", tags=["tutor"])
 logger = logging.getLogger(__name__)
@@ -82,6 +84,11 @@ def _vector_store():
     return EditorialVectorStore()
 
 
+def file_checks() -> Checks:
+    """確認用コード（愚直解・入力を作るコード）を data/editorials/{問題ID}/checkers.json に保存する確認。"""
+    return Checks(store=FileCheckerStore(EDITORIALS_DIR))
+
+
 def _searcher():
     try:
         return _vector_store()
@@ -121,6 +128,7 @@ def explain_submission(req: ExplainRequest, db: Session = Depends(get_db)):
             body_text=get_problem_body_text(req.problem_id),
             username=req.username,
             generate_first=generate_first,
+            checks=file_checks(),
         )
     except TutorError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -159,6 +167,7 @@ def submit_result(log_id: int, req: SubmitResultRequest, db: Session = Depends(g
             body_text=get_problem_body_text(log.problem_id),
             username=req.username,
             generate_first=generate_first,
+            checks=file_checks(),
             retry_of=log,
         )
     except TutorError as e:

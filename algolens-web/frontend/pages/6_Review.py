@@ -85,27 +85,42 @@ def _sample_cases(cases: list[dict]) -> None:
             st.caption("エラー"); st.code(case["stderr"])
 
 
-def verification_summary(result: dict) -> str:
-    """修正版について何を確かめたかを 1 行で（例: サンプル 3/3 通過・最大サイズの入力 0.8 秒・提出での確認はまだ）。"""
-    cases = result["sample_cases"]
-    passed = sum(1 for c in cases if c["status"] == "AC")
-    parts = [f"サンプル {passed}/{len(cases)} 通過" if cases else "サンプル 確認なし"]
-
-    stress = result.get("stress")
+def _stress_text(stress: dict | None) -> str:
     if stress is None:
-        parts.append("最大サイズの入力 未実行")
-    elif stress["status"] == "ok":
-        parts.append(
-            f"最大サイズの入力 {stress['seconds']:.1f} 秒"
-            f"（{stress['interpreter']}・制限 {stress['time_limit']:g} 秒）"
-        )
-    elif stress["status"] == "TLE":
-        parts.append(f"最大サイズの入力 {stress['time_limit']:g} 秒で時間切れ（{stress['interpreter']}）")
+        return "最大サイズの入力 未実行"
+    if stress["status"] == "ok":
+        n = f"{stress['inputs']} 種の" if stress.get("inputs", 1) > 1 else ""
+        return f"最大サイズの{n}入力 {stress['seconds']:.1f} 秒（{stress['interpreter']}・制限 {stress['time_limit']:g} 秒）"
+    if stress["status"] == "TLE":
+        return f"最大サイズの入力 {stress['time_limit']:g} 秒で時間切れ（{stress['interpreter']}）"
+    return "最大サイズの入力 確認できず"
+
+
+def _samples_text(cases: list[dict]) -> str:
+    passed = sum(1 for c in cases if c["status"] == "AC")
+    return f"サンプル {passed}/{len(cases)} 通過" if cases else "サンプル 確認なし"
+
+
+def verification_summary(result: dict) -> str:
+    """赤ペン版について何を確かめたかを 1 行で（例: サンプル 3/3 通過・愚直解と 30/30 一致・最大サイズの入力 0.8 秒・提出での確認はまだ）。"""
+    parts = [_samples_text(result["sample_cases"])]
+
+    brute = result.get("brute")
+    if brute is None:
+        parts.append("愚直解との比較 なし")
+    elif brute["status"] == "ok":
+        parts.append(f"愚直解と {brute['matched']}/{brute['total']} 一致")
+    elif brute["status"] == "mismatch":
+        parts.append(f"愚直解と {brute['total']} 件目で不一致")
     else:
-        parts.append("最大サイズの入力 確認できず")
+        parts.append("愚直解との比較 できず")
+
+    parts.append(_stress_text(result.get("stress")))
 
     status = result.get("fix_status")
-    if status is None:
+    if result.get("fix_found") is False:
+        pass  # 提出する修正版がない
+    elif status is None:
         parts.append("提出での確認はまだ")
     elif status == "確認済み":
         parts.append("提出で AC（確認済み）")
@@ -151,8 +166,60 @@ def render_submit_result_form(result: dict) -> None:
     st.rerun()
 
 
+_ACTION_LABEL = {"replace": "置き換え", "delete": "削除", "insert_after": "この行の後に追加"}
+
+
+def _redpen_table(edits: list[dict]) -> None:
+    if not edits:
+        st.write("赤ペンはありません。")
+        return
+    st.dataframe(
+        [
+            {
+                "行": e["line"],
+                "操作": _ACTION_LABEL.get(e["action"], e["action"]),
+                "元の行": e["original"],
+                "新しい行": e["new"],
+                "理由": e["reason"],
+            }
+            for e in edits
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def _attempt_table(attempts: list[dict]) -> None:
+    if not attempts:
+        st.write("記録はありません。")
+        return
+    st.dataframe(
+        [
+            {"回": a["attempt"], "結果": f"❌ {a['failed']}で落ちた" if a["failed"] else "✅ すべて通過", "内容": a["detail"]}
+            for a in attempts
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def _alternative(alt: dict, original_code: str) -> None:
+    st.markdown(f"**計算量:** {alt['complexity'] or '不明'}　/　**確かめたこと:** "
+                f"{_samples_text(alt['sample_cases'])}・{_stress_text(alt['stress'])}")
+    if alt["reason"]:
+        st.markdown(alt["reason"])
+    st.caption("別解は赤ペンの代わりではありません。考え方の違いを見るためのものです。")
+    st.code(alt["code"], language="python")
+
+
 def render_mistake(result: dict) -> None:
-    """WA / TLE / RE の家庭教師の結果。"""
+    """WA / TLE / RE の家庭教師の結果。① 赤ペン（修正版）と ② 別解 を分けて出す。"""
+    fix_found = result.get("fix_found", True)
+    if not fix_found:
+        st.error(
+            f"少ない修正では直せませんでした（赤ペンを {result['attempts']} 回試しましたが、確認を通りませんでした）。"
+            "下の赤ペン案は正しくありません。解説と別解を参考にしてください。"
+        )
     for w in result["warnings"]:
         st.warning(w)
 
@@ -162,28 +229,53 @@ def render_mistake(result: dict) -> None:
     c3.metric("同じミスの過去回数", f"{result['past_same_type_count']} 回")
     ops = result.get("estimated_ops")
     c4.metric(
-        "修正版の計算量", result.get("complexity") or "不明",
+        "赤ペン版の計算量", result.get("complexity") or "不明",
         help=f"制約の上限での計算回数の目安: {ops:.1e} 回" if ops is not None else "計算回数の目安: 不明",
     )
 
     st.markdown(f"**確かめたこと:** {verification_summary(result)}")
-    st.caption(f"修正案の作成回数: {result['attempts']} 回")
-    render_submit_result_form(result)
+    failed = [a for a in result.get("attempt_log", []) if a["failed"]]
+    retry = "、".join(f"{a['attempt']} 回目: {a['failed']}" for a in failed)
+    st.caption(f"赤ペンの作成回数: {result['attempts']} 回" + (f"（落ちた確認 — {retry}）" if retry else ""))
+    if fix_found:
+        render_submit_result_form(result)
 
     st.markdown(f"**ずれ:** {result['gap_summary']}")
     st.markdown(f"**正しい考え方:** {result['correct_idea']}")
     st.markdown(f"**教訓:** {result['lesson']}")
 
-    tab_fix, tab_diff, tab_orig, tab_samples = st.tabs(["修正版コード", "差分", "元のコード", "サンプル結果"])
-    with tab_fix:
+    alt = result.get("alternative")
+    labels = ["① 赤ペン", "修正版コード", "差分", "元のコード", "サンプル結果", "確認の記録"]
+    if alt:
+        labels.append("② 別解")
+    tabs = st.tabs(labels)
+    with tabs[0]:
+        st.caption(f"変更 {result['diff_lines']} 行 / 元コード {result['total_lines']} 行（コメント・空行を除く）")
+        _redpen_table(result.get("edits", []))
+    with tabs[1]:
+        if not fix_found:
+            st.caption("⚠️ 確認を通っていない赤ペン案を当てたコードです")
         st.code(result["fixed_code"], language="python")
-    with tab_diff:
-        st.caption(f"変更 {result['diff_lines']} 行 / 元コード {result['total_lines']} 行")
+    with tabs[2]:
         st.code(result["diff"] or "（差分なし）", language="diff")
-    with tab_orig:
+    with tabs[3]:
         st.code(result["original_code"], language="python")
-    with tab_samples:
+    with tabs[4]:
         _sample_cases(result["sample_cases"])
+        brute = result.get("brute")
+        if brute and brute.get("failure"):
+            f = brute["failure"]
+            st.markdown(f"❌ 愚直解との比較 {brute['total']} 件目: **{f['status']}**")
+            cols = st.columns(3)
+            cols[0].caption("入力"); cols[0].code(f["input"])
+            cols[1].caption("愚直解の答え"); cols[1].code(f["expected"])
+            cols[2].caption("赤ペン版の答え"); cols[2].code(f["actual"] or "（なし）")
+    with tabs[5]:
+        st.caption("赤ペンの指定 → 変更の大きさ → 計算回数 → サンプル → 愚直解との比較 → 最大サイズ の順に確かめ、落ちたら作り直します")
+        _attempt_table(result.get("attempt_log", []))
+    if alt:
+        with tabs[6]:
+            _alternative(alt, result["original_code"])
 
     st.markdown("**解説**")
     st.markdown(result["explanation"] or "（解説を生成できませんでした）")
@@ -197,6 +289,9 @@ def render_ac(payload: dict, original_code: str | None) -> None:
     suggestion = payload.get("suggestion")
     if suggestion:
         st.success(f"💡 {payload['summary']}（{suggestion['improvement']}）")
+        st.caption(
+            f"確かめたこと: {_samples_text(payload.get('sample_cases', []))}・{_stress_text(suggestion.get('stress'))}"
+        )
     else:
         st.info(f"👍 {payload['summary']}")
     if payload.get("note"):
@@ -415,7 +510,7 @@ with tab_manual:
                 "verdict": verdict,
                 "username": username or None,
             }
-            with st.spinner("Gemini が修正案を作り、サンプルと最大サイズの入力で確認しています（1 分ほどかかることがあります）..."):
+            with st.spinner("Gemini が赤ペンを作り、サンプル・愚直解・最大サイズの入力で確認しています（1 分ほどかかることがあります）..."):
                 try:
                     r = requests.post(f"{API_BASE}/tutor/explain", json=payload, timeout=300)
                 except requests.exceptions.ConnectionError:

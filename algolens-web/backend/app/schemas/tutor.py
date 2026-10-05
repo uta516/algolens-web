@@ -36,7 +36,40 @@ class StressOut(BaseModel):
     time_limit: float
     seconds: float | None
     input_bytes: int
+    inputs: int = 0
     note: str
+
+
+class EditOut(BaseModel):
+    line: int
+    action: str  # replace / delete / insert_after
+    original: str
+    new: str
+    reason: str
+
+
+class AttemptOut(BaseModel):
+    attempt: int
+    failed: str | None  # 落ちた確認（サンプル・愚直解との比較・計算回数・最大サイズ など）。通れば None
+    detail: str
+
+
+class BruteOut(BaseModel):
+    status: str  # ok / mismatch / skipped
+    total: int
+    matched: int
+    note: str
+    failure: SampleCaseOut | None
+
+
+class AlternativeOut(BaseModel):
+    code: str
+    complexity: str
+    reason: str
+    sample_cases: list[SampleCaseOut]
+    stress: StressOut
+    diff_lines: int
+    total_lines: int
 
 
 class ExplainResponse(BaseModel):
@@ -65,6 +98,12 @@ class ExplainResponse(BaseModel):
     complexity: str
     estimated_ops: float | None
     stress: StressOut | None
+    # 赤ペン（少ない修正）が全部の確認を通ったか。False なら「少ない修正では直せない」
+    fix_found: bool
+    edits: list[EditOut]
+    attempt_log: list[AttemptOut]
+    brute: BruteOut | None
+    alternative: AlternativeOut | None
     fix_status: str | None
     submitted_verdict: str | None
     retry_of_id: int | None
