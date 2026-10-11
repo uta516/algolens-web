@@ -739,11 +739,70 @@ def test_rewrite_until_limit_means_fix_not_found(db):
     assert result.sample_cases  # 実行前に止まっても、表示用にサンプルの結果は取る
 
 
-def test_edits_on_blank_or_comment_lines_are_rejected():
-    with pytest.raises(EditError, match="空行かコメント"):
-        apply_edits(_COMMENTED, parse_edits([{"line": 3, "action": "replace", "original": "", "new": "x = 1", "reason": ""}]))
-    with pytest.raises(EditError, match="空行かコメント"):
+def test_edits_on_comment_lines_are_rejected():
+    with pytest.raises(EditError, match="コメントの行"):
+        apply_edits(_COMMENTED, parse_edits([{"line": 2, "action": "replace", "original": "#   N = int(input())",
+                                              "new": "N = int(input())", "reason": ""}]))
+    with pytest.raises(EditError, match="コメントの行"):
         apply_edits(_COMMENTED, parse_edits([{"line": 1, "action": "delete", "original": "# テンプレート", "new": "", "reason": ""}]))
+
+
+def test_replace_on_blank_line_inserts_code_there():
+    edits = parse_edits([{"line": 3, "action": "replace", "original": "", "new": "import sys\ninput = sys.stdin.readline",
+                          "reason": ""}])
+    assert apply_edits(_COMMENTED, edits) == (
+        "# テンプレート\n#   N = int(input())\nimport sys\ninput = sys.stdin.readline\n"
+        "a, b = map(int, input().split())\n\nprint(a * b)  # 出力\n"
+    )
+
+
+def test_insert_after_blank_line_and_delete():
+    edits = parse_edits([
+        {"line": 5, "action": "insert_after", "original": "", "new": "c = a + b", "reason": ""},
+        {"line": 6, "action": "delete", "original": "print(a * b)  # 出力", "new": "", "reason": ""},
+        {"line": 6, "action": "insert_after", "original": "", "new": "print(c)", "reason": ""},
+    ])
+    assert apply_edits(_COMMENTED, edits) == (
+        "# テンプレート\n#   N = int(input())\n\na, b = map(int, input().split())\n\nc = a + b\nprint(c)\n"
+    )
+
+
+def test_all_edit_errors_are_reported_together():
+    edits = parse_edits([
+        {"line": 1, "action": "replace", "original": "# テンプレート", "new": "import sys", "reason": ""},
+        {"line": 4, "action": "replace", "original": "print(a * b)", "new": "x", "reason": ""},
+    ])
+    with pytest.raises(EditError) as e:
+        apply_edits(_COMMENTED, edits)
+    assert "line 1 はコメントの行" in str(e.value)
+    assert "line 4 の original が元のコードと合いません" in str(e.value)
+
+
+# 前もって表を作る行を差し込み、2 行を書き換える直し（ABC479 D の形）
+_QUERY = (
+    "N = int(input())\nR = list(map(int, input().split()))\n\n"
+    "for _ in range(N):\n    s = int(input())\n    x = min(R[0:s])\n    print(x)\n"
+)
+
+
+def test_inserted_lines_count_toward_change_size():
+    edits = parse_edits([
+        {"line": 3, "action": "replace", "original": "", "new": "pre = R[:]\nfor i in range(1, N):\n    pre[i] = min(pre[i-1], R[i])",
+         "reason": ""},
+        {"line": 6, "action": "replace", "original": "x = min(R[0:s])", "new": "    x = pre[s-1]", "reason": ""},
+    ])
+    fixed = apply_edits(_QUERY, edits)
+    _, changed, total = compute_diff(_QUERY, fixed)
+    assert (changed, total) == (4, 6)  # 差し込んだ 3 行 + 書き換えた 1 行
+    assert is_rewrite(changed, total)  # 6 行中 4 行は半分を超える
+
+
+def test_only_inserted_lines_still_count_as_rewrite_when_large():
+    edits = parse_edits([{"line": 2, "action": "insert_after", "original": "",
+                          "new": "\n".join(f"y{i} = {i}" for i in range(4)), "reason": ""}])
+    _, changed, total = compute_diff(_QUERY, apply_edits(_QUERY, edits))
+    assert (changed, total) == (4, 6)
+    assert is_rewrite(changed, total)
 
 
 def test_no_op_replace_is_ignored():

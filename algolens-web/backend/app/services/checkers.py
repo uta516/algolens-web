@@ -156,7 +156,8 @@ def prepare_brute_cases(brute_code: str, small_generator: str, n: int = BRUTE_CA
     for seed in range(1, n + 1):
         gen = run_python(small_generator, "", GENERATOR_TIME_LIMIT_SEC, args=(str(seed),))
         if gen.status != "ok" or not gen.stdout.strip():
-            return BruteCases(cases, f"小さい入力を作るコードが失敗しました（種 {seed}）: {gen.stderr[-300:]}")
+            why = {"TLE": "時間切れ", "RE": gen.stderr[-300:]}.get(gen.status, "出力が空でした")
+            return BruteCases(cases, f"小さい入力を作るコードが失敗しました（種 {seed}）: {why}")
         expected = run_python(brute_code, gen.stdout, SMALL_CASE_TIME_LIMIT_SEC)
         if expected.status == "ok":
             cases.append((gen.stdout, expected.stdout))

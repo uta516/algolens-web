@@ -5,7 +5,8 @@
      - ① 赤ペン: 元のコードへの変更の一覧（行番号・元の行・新しい行・理由）と、計算量・計算回数の目安
      - ② 別解: もっと簡単な解き方があれば（①の代わりにはしない）
      - 確認用コード（愚直解・小さい入力を作るコード・最大サイズの入力を作るコード）。
-       問題ごとに保存し、保存済みなら頼まない
+       問題ごとに保存し、保存済みなら頼まない（保存済みの愚直解がサンプルを通らない・小さい入力を
+       作れないときは捨てて頼み直す）
   2. 赤ペンを元のコードに当てて確かめ、だめなら落ちた確認を伝えて 1 をやり直す（最大 2 回）
      赤ペンの指定 → 変更の大きさ（半分を超えたら書き直しとみなす）→ 計算回数の目安 → サンプル
      → 愚直解との比較 → 最大サイズの入力 の順
@@ -325,15 +326,21 @@ def build_first_prompt(
 - 私のコードの考え方・構造・変数名を残し、バグの原因の行だけを直す。全体の書き直しは禁止
 - まず「私の考え方のままで、どの行をどう変えれば正しくなるか」を考える。
   初期値を変える・不等号を変える・分岐の中身を差し替える・条件を 1 つ足す、のような小さな直しを優先する
-- 変える行（コメント・空行を除く）は元のコードの半分以下にする。超えると書き直しとみなして受け付けない
+- 変える行（書き換えた行と差し込んだ行。コメント・空行を除く）は元のコードの半分以下にする。
+  超えると書き直しとみなして受け付けない
 - 変更は edits の一覧で表す。下のコードの行番号を使う
   - action "replace": line の行を new に置き換える（original にはその行の元の内容）。
     new は複数行でもよい（1 行を数行のブロックに置き換えられる）
   - action "delete": line の行を消す（original にはその行の元の内容、new は空文字）
-  - action "insert_after": line の行の後に new を入れる（先頭なら line は 0、original は空文字）
+  - action "insert_after": line の行の後に new を入れる（先頭なら line は 0、original は空文字）。
+    前もって表や配列を作る行を足すときなどに使う
   - new はインデントも含めて書く。複数行なら改行で区切る
+  - original には、その行番号の行の内容をそのまま写す（行番号と内容がずれていると受け付けない）
   - reason: なぜ直すかを短く
-- 空行とコメントの行は edits の対象にしない（そのまま残す）。内容を変えない replace も書かない
+- 空行は replace で書き込んでよい（original は空文字）
+- コメントの行（# で始まる行）は replace / delete できない。コメントに書かれたコード
+  （例: import sys; input = sys.stdin.readline）を使いたいときは、insert_after で新しい行として入れる
+- 内容を変えない replace は書かない
 - 直す行が少ないほど良い。使わなくなった行も、動作に影響しなければ残してよい
 - 制約の上限の入力でも制限時間（{problem.time_limit_sec:g} 秒）に間に合うこと
 
@@ -412,7 +419,11 @@ def build_explanation_prompt(
 {similar_lines}
 
 ## 出力（JSON）
-- explanation: Markdown の解説。次の順で簡潔に。
+- explanation: Markdown の解説。
+  最初に、見出しを付けずに次の 2 つを短く書く（それぞれ「**考え方:**」「**直し方:**」で始める）。
+  - **考え方:** あなたの考え方が合っているかどうか（合っている / 一部合っている / 違う、を一文で）
+  - **直し方:** どこをどう直せばよいかを 1〜2 文で
+  そのあとに次の順で、それぞれ 2〜3 文程度の短い説明を書く。
   1. どこがずれていたか（差分の行を指して）
   2. 正しい考え方
   3. 同じミスを繰り返さないためのチェックポイント（過去の回数に触れる）
@@ -623,6 +634,30 @@ def _absorb_checkers(
     return brute_cases
 
 
+def _load_saved_brute(
+    problem: ProblemData, checkers: ProblemCheckers, checks: Checks, notes: list[str]
+) -> BruteCases | None:
+    """保存済みの愚直解を確かめて小さい入力を用意する。
+
+    愚直解がサンプルを通らない、または小さい入力を作れないときは、保存したものを捨てる
+    （checkers から消して保存し直すので、次の赤ペンの呼び出しで作り直しを頼む）。
+    """
+    if not checkers.has_brute:
+        return None
+    reason = ""
+    if checks.runner(checkers.brute_code, problem.samples).passed is False:
+        reason = "保存済みの愚直解がサンプルを通らなかった"
+    else:
+        cases = checks.prepare_brute(checkers.brute_code, checkers.small_generator)
+        if not cases.note:
+            return cases
+        reason = f"保存済みの愚直解で比較の準備に失敗した（{cases.note}）"
+    notes.append(f"{reason}ため、捨てて作り直しました")
+    checkers.brute_code = checkers.small_generator = ""
+    checks.store.save(problem.problem_id, checkers)
+    return None
+
+
 def _verify_redpen(
     code: str,
     data: dict,
@@ -720,16 +755,12 @@ def generate_fix(
     checks = checks or Checks()
     notes: list[str] = []
     checkers = checks.store.load(problem.problem_id)
-    brute_cases = None
-    if checkers.has_brute:
-        brute_cases = checks.prepare_brute(checkers.brute_code, checkers.small_generator)
-        if brute_cases.note:
-            notes.append(f"保存済みの愚直解で比較の準備に失敗しました: {brute_cases.note}")
-            brute_cases = None
+    brute_cases = _load_saved_brute(problem, checkers, checks, notes)
     # 元のコードが間違える小さい入力。愚直解がまだなければ、1 回目の応答で得てから求める
     counterexample = _counterexample(code, brute_cases, checks)
 
     feedback = ""
+    edit_errors: list[str] = []   # これまでの「赤ペンの指定」の誤り（同じ誤りを繰り返さないよう毎回伝える）
     last: RedPen | None = None
     last_analysis: dict | None = None
     first_data: dict | None = None
@@ -759,6 +790,11 @@ def generate_fix(
         last_analysis = analysis
         pen, failed, feedback, detail = _verify_redpen(code, data, analysis, problem, checkers, brute_cases, checks)
         log.append(Attempt(attempt, failed, detail))
+        if edit_errors and failed is not None:
+            earlier = "\n".join(edit_errors)
+            feedback += f"\n\nそれより前の赤ペンでも、次の指定を受け付けませんでした（同じ指定を繰り返さないで）:\n{earlier}"
+        if failed == CHECK_EDITS:
+            edit_errors.append(detail)
         if pen is not None:
             last = pen
         if failed is None:
