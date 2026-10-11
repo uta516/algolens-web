@@ -1,6 +1,7 @@
 # AlgoLens
 
-> AtCoder の提出データを可視化・分析し、弱点特定と学習最適化を支援する Web アプリケーション
+> AtCoder の提出データを可視化・分析し、弱点特定と学習最適化を支援する Web アプリケーション。
+> コンテスト後の提出を取り込み、AI 家庭教師（RAG）が「元のコードを活かした最小修正」「ずれの解説」「次に解く問題」を返します。
 
 ---
 
@@ -12,34 +13,48 @@
 |----------|------|
 | Backend | Python 3 / FastAPI 0.115 / SQLAlchemy 2.0 / Pydantic 2 |
 | Frontend | Streamlit 1.41 / Plotly 5 |
-| Database | SQLite（開発）/ Alembic（マイグレーション対応） |
-| AI | Google Gemini API (`gemini-2.5-flash-lite`) |
+| Database | SQLite（開発） |
+| AI | Google Gemini API（修正案: `gemini-2.5-flash`、それ以外・フォールバック: `gemini-2.5-flash-lite`） |
+| RAG | ChromaDB 1.5（cosine）/ sentence-transformers（`multilingual-e5-small`, CPU） |
 | Testing | pytest 8.3 / pytest-cov |
 | Scraping | httpx / BeautifulSoup4 |
 
 ### アーキテクチャ
 
 ```
-algolens-web/
-├── backend/
-│   ├── app/
-│   │   ├── core/          # DB接続・環境設定（pydantic-settings）
-│   │   ├── models/        # SQLAlchemy ORM モデル
-│   │   ├── schemas/       # Pydantic スキーマ（入出力バリデーション）
-│   │   ├── routers/       # FastAPI ルーター（エンドポイント定義）
-│   │   ├── services/      # ビジネスロジック層
-│   │   └── repositories/  # データアクセス層
-│   ├── data/
-│   │   └── snippets.json  # マイ・スニペット永続化ストア
-│   └── tests/             # pytest テストスイート
-└── frontend/
-    ├── pages/
-    │   ├── 1_Problems.py          # 提出一覧・JST時刻表示
-    │   ├── 2_Knowledge_Base.py    # 静的ナレッジベース（チートシート・スニペット）
-    │   ├── 3_Sync.py              # データ同期
-    │   ├── 4_Analysis.py          # 難易度分析グラフ
-    │   └── 5_AI_Knowledge_Base.py # AI ナレッジベース（Gemini連携）
-    └── app.py
+AtCorder/
+├── algolens-web/
+│   ├── backend/
+│   │   ├── app/
+│   │   │   ├── core/          # DB接続・環境設定（pydantic-settings）
+│   │   │   ├── models/        # ORM モデル（User / Problem / Submission / MistakeLog / TutorReport）
+│   │   │   ├── schemas/       # Pydantic スキーマ（入出力バリデーション）
+│   │   │   ├── routers/       # FastAPI ルーター（users / problems / submissions / analysis /
+│   │   │   │                  #   knowledge / sync / tutor / review）
+│   │   │   └── services/      # ビジネスロジック層
+│   │   │       ├── tutor.py              # RAG 家庭教師の本体（赤ペン・別解・解説・似た問題）
+│   │   │       ├── redpen.py             # 赤ペン（行単位の変更一覧）の適用と検証
+│   │   │       ├── checkers.py           # サンプル・愚直解比較・最大サイズ入力での実行確認
+│   │   │       ├── review.py             # コンテスト振り返り（提出の取り込みと1問ずつの処理）
+│   │   │       ├── editorial_*.py        # 公式解説の取得・分割・索引登録
+│   │   │       ├── vector_store.py       # ChromaDB による公式解説のベクトル検索
+│   │   │       ├── workspace.py          # submissions/ 作業フォルダの扱い
+│   │   │       └── atcoder*.py / contests.py  # AtCoder Problems API・コンテスト情報
+│   │   ├── scripts/           # 同期・索引作成・コンテスト用ファイル作成・サンプル実行
+│   │   ├── data/              # snippets.json（DB・解説・ChromaDB は git 管理外）
+│   │   └── tests/             # pytest テストスイート
+│   └── frontend/
+│       ├── pages/
+│       │   ├── 1_Problems.py          # 提出一覧・JST時刻表示
+│       │   ├── 2_Knowledge_Base.py    # 静的ナレッジベース（チートシート・スニペット）
+│       │   ├── 3_Sync.py              # データ同期
+│       │   ├── 4_Analysis.py          # 難易度分析グラフ
+│       │   ├── 5_AI_Knowledge_Base.py # AI ナレッジベース（Gemini連携）
+│       │   └── 6_Review.py            # 振り返り（RAG 家庭教師）
+│       └── app.py
+├── submissions/               # 自分の解答（abc477/c.py）と入力例（c.txt, git 管理外）
+├── docs/rag-tutor-design.md   # RAG 家庭教師の設計メモ
+└── .vscode/tasks.json         # VS Code タスク（サンプル実行・コンテスト用ファイル作成）
 ```
 
 ---
@@ -49,17 +64,37 @@ algolens-web/
 ### セットアップ
 
 ```bash
+cd algolens-web
+
 # 仮想環境の作成・有効化
 python -m venv .venv
 .venv\Scripts\Activate.ps1   # Windows
 source .venv/bin/activate    # macOS/Linux
 
-# 依存パッケージのインストール
+# 依存パッケージのインストール（torch は容量削減のため CPU 版を先に入れる）
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
 # 環境変数の設定
 cp .env.example .env
-# .env に GEMINI_API_KEY を設定
+# .env に GEMINI_API_KEY を設定（必要に応じて CHROMA_DIR / SUBMISSIONS_DIR / PYPY_PATH も）
+```
+
+| 環境変数 | 説明 |
+|----------|------|
+| `GEMINI_API_KEY` | Gemini API キー（AI ナレッジ・家庭教師で使用） |
+| `DATABASE_URL` | DB の接続先（既定: `sqlite:///./data/algolens.db`） |
+| `CHROMA_DIR` | 公式解説ストア（ChromaDB）の保存先。OneDrive など同期フォルダの外を推奨（既定: `backend/data/chroma/`） |
+| `SUBMISSIONS_DIR` | 解答を置くフォルダ（既定: `AtCorder/submissions/`） |
+| `PYPY_PATH` | 修正版を最大サイズの入力で測る PyPy（AtCoder と同じ PyPy 3.11 推奨。なければ CPython で制限時間を 5 倍に緩めて測る） |
+
+### 公式解説ストアの作成（RAG 家庭教師を使う場合）
+
+```bash
+cd backend
+python scripts/build_editorial_index.py              # ABC の C・D 問題（難易度 1200 未満）の公式解説を取得して登録
+python scripts/refresh_editorials.py                 # 取り込み時に解説が未公開だった問題を取り直す
+python scripts/search_editorials.py "区間の和を高速に求めたい"   # 検索の動作確認
 ```
 
 ### 起動方法
@@ -86,6 +121,18 @@ cd frontend
 streamlit run app.py
 ```
 
+- API ドキュメント: http://localhost:8000/docs
+- フロントエンド: http://localhost:8501
+
+### コンテストでの使い方
+
+1. **ファイルを作る**: `python backend/scripts/new_contest.py abc477 --upto d` で `submissions/abc477/a.py〜d.py` と入力例用の `a.txt〜d.txt` を作成（VS Code タスク「AtCoder: コンテストのファイルを作る」でも可）
+2. **解く**: VS Code で `c.py` を書き、`c.txt` に入力例・出力例を貼って `Ctrl+Shift+B`（`scripts/test.py`）でサンプルを試す
+3. **提出**: AtCoder への提出は自分で行う（自動提出はしない）
+4. **振り返る**: コンテスト終了後、Streamlit の「振り返り」ページで提出を取り込み、問題ごとに家庭教師の結果を確認する
+   - AtCoder の生成 AI 利用ルールに従い、コンテスト終了前は取り込み・解説を行わない
+   - 修正版を提出した結果（AC / WA / TLE など）を記録でき、AC 以外なら修正案を作り直す
+
 ### テストの実行
 
 ```bash
@@ -106,6 +153,9 @@ pytest --cov=app tests/
 | GET | `/submissions/` | 提出一覧（user_id / problem_id / status フィルター対応） |
 | GET | `/submissions/{id}` | 提出詳細取得 |
 | GET | `/analysis/{username}` | 難易度別・タグ別 AC 率分析 |
+| POST | `/sync/problems` | 問題マスタ・難易度の一括同期 |
+| POST | `/sync/tags` | 問題タグの同期 |
+| POST | `/sync/submissions/{username}` | 提出データの同期（ページネーション対応） |
 | GET | `/knowledge/patterns` | Gemini による頻出パターン分析 |
 | GET | `/knowledge/weekly-insights/{username}` | 直近提出の Weekly Insights |
 | GET | `/knowledge/study_guide/{username}` | AI 学習方針・推奨過去問 |
@@ -114,20 +164,41 @@ pytest --cov=app tests/
 | PUT | `/knowledge/snippets/{id}` | スニペット更新 |
 | DELETE | `/knowledge/snippets/{id}` | スニペット削除 |
 | GET | `/knowledge/ping` | Gemini API 疎通確認 |
+| POST | `/tutor/explain` | 提出コードから赤ペン（最小修正）・別解・ずれの解説・似た問題を返す |
+| POST | `/tutor/logs/{log_id}/submit-result` | 修正版の提出結果を記録（AC 以外なら作り直す） |
+| GET | `/review/contests` | 取り込める直近の ABC（提出があるもの） |
+| POST | `/review/import` | コンテストの提出を取り込み、問題ごとの処理待ちを作る（終了前は 403） |
+| POST | `/review/process/{report_id}` | 1 問ずつ家庭教師の結果を作って保存（コードがなければ 422） |
+| PUT | `/review/reports/{report_id}/code` | 画面で貼り付けた提出コードを保存 |
+| GET | `/review/reports` | 保存済みの振り返り結果 |
+| GET | `/review/saved-contests` | 振り返り済みのコンテスト一覧 |
 | GET | `/health` | ヘルスチェック |
 
 ---
 
 ## ✨ 現在の機能一覧
 
+### RAG 家庭教師・振り返り（`feature/rag-tutor` で追加）
+
+- **赤ペン（最小修正）**：LLM に修正後のコード全体ではなく「行番号・元の行・新しい行・理由」の変更一覧を出させ、元のコードに当てる。変更が元のコードの半分を超えたら書き直しとみなしてやり直す
+- **修正版の確認**：赤ペンの指定 → 変更の大きさ → 計算回数の目安 → サンプル → 愚直解との比較（小さいランダム入力 30 件）→ 最大サイズの入力（制限時間内か）の順に確認し、落ちたら理由を伝えて最大 2 回やり直す
+- **確認用コードの保存**：愚直解・小さい入力を作るコード・最大サイズの入力を作るコードを問題ごとに `checkers.json` に保存して再利用。実行は別プロセスの Python（`-I`、一時ディレクトリ）で行う
+- **別解**：もっと簡単な解き方があれば、サンプルと最大サイズの入力で確かめて通ったときだけ表示
+- **ずれの解説と分類**：差分の大きさで「書き方」「考え方」のミスに分け、`mistake_logs` に保存して同じ種類のミスの過去回数を数える
+- **似た問題の提示**：公式解説のベクトル検索（code / proof チャンク除外・問題単位の重複除去・本問除外）で似た問題を探し、AC 済みなら「参考」、未 AC なら「次に解く問題」として表示
+- **コンテスト振り返り**：直近の ABC の最後の提出を取り込み、1 問ずつ処理して保存。提出コードは `submissions/` から読み、なければ画面で貼り付け
+- **提出結果の記録**：修正版を提出した結果を記録し、AC 以外なら修正案を作り直す
+- **Gemini の扱い**：修正案は `gemini-2.5-flash`、混雑（503）・クォータ超過（429）時は `flash-lite` に切り替え、混雑時は待って再試行
+- **AtCoder Problems の取得失敗時**：再試行し、それでも取れなければ DB 内の提出データで続行（警告を表示）
+
 ### バックエンド (FastAPI)
 
-- **ORM モデル**：`User` / `Problem` / `Submission` の3モデル（SQLAlchemy 2.0 `Mapped` 型）
+- **ORM モデル**：`User` / `Problem` / `Submission` / `MistakeLog` / `TutorReport`（SQLAlchemy 2.0 `Mapped` 型）
 - **REST API**：ユーザー・問題・提出の CRUD + 重複登録時の 409 エラー返却
-- **難易度分析**：8色バケット（灰〜赤）による AC 率・問題数集計
+- **難易度分析**：8色バケット（灰〜赤）による AC 率・問題数集計（負の難易度は灰に含める）
 - **AI ナレッジ API**：Gemini 連携（パターン分析 / Weekly Insights / 学習方針）、インメモリキャッシュ（TTL 1時間）
 - **スニペット CRUD**：UUID 管理・カテゴリ分類・`snippets.json` 永続化
-- **データ同期**：AtCoder Problems API から8,500問超の一括 upsert スクリプト
+- **データ同期**：AtCoder Problems API から問題マスタ・タグ・提出データを同期
 
 ### フロントエンド (Streamlit)
 
@@ -137,20 +208,28 @@ pytest --cov=app tests/
   - 入力チートシート
   - 典型アルゴリズム 12本（bit全探索 / bit DP / Floyd-Warshall / DP / ソート / 二分探索 / 累積和 / いもす法 / 尺取り法 / 貪欲法 / BIT / 繰り返し二乗法 / 素数篩）
   - マイ・スニペット（追加・編集・削除 UI）
-- **3_Sync**：ワンクリックデータ同期
+- **3_Sync**：ユーザー登録・問題マスタ・タグ・提出データのワンクリック同期
 - **4_Analysis**：Plotly 難易度別グラフ（AtCoder 公式カラー対応）
 - **5_AI_Knowledge_Base**：
   - パターン分析（Gemini）
   - Weekly Insights
   - 今後の学習方針（Next Action Plan）
   - 典型アルゴリズム スニペット集（7パターン）
+- **6_Review（振り返り）**：
+  - 📅 コンテストの振り返り：コンテストを選んで取り込み → 問題ごとのタブで提案コード・差分・元のコード・サンプル結果・解説・似た問題を表示
+  - ✍️ 手入力で解説：問題 ID とコードを入力して家庭教師の結果を表示
+  - 修正版の提出結果の記録
 
 ### 開発・運用ツール
 
 - `algolens-web.bat`：ダブルクリック起動ショートカット（Windows）
 - `start.ps1`：バックエンド・フロントエンド同時起動スクリプト
 - `scripts/sync_atcoder_data.py`：AtCoder データ一括同期
-- `pytest` テストスイート：17テスト（ユーザー7 + 問題10）
+- `scripts/build_editorial_index.py` / `refresh_editorials.py` / `search_editorials.py`：公式解説ストアの作成・更新・検索確認
+- `scripts/new_contest.py`：コンテスト用の解答ファイル・入力例ファイルを作成
+- `scripts/test.py`：入力例ファイルのサンプルで解答を実行し、出力例と比較
+- `.vscode/tasks.json`：上の2スクリプトを VS Code タスクとして実行（`Ctrl+Shift+B` でサンプル実行）
+- `pytest` テストスイート：187テスト（ユーザー / 問題 / 公式解説の取得・分割 / ベクトル検索 / 家庭教師 / 振り返り / 作業フォルダ）
 
 ---
 
