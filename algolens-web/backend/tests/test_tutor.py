@@ -909,6 +909,7 @@ def test_tle_with_correct_answers_is_told_only_slow(db):
     assert result.explanation.split("\n")[0] == ONLY_SLOW_APPROACH
     assert "一部合っています" not in result.explanation
     assert "**直し方:** 表を作る。" in result.explanation
+    assert result.log.mistake_level == LEVEL_ONLY_SLOW
 
 
 def test_tle_with_counterexample_is_told_the_input(db):
@@ -921,3 +922,25 @@ def test_tle_with_counterexample_is_told_the_input(db):
     assert "私のコードが間違える小さい入力" in first
     assert ONLY_SLOW_MESSAGE not in first
     assert result.explanation.startswith("**考え方:** 一部合っています。")
+    assert result.log.mistake_level == "書き方"  # 反例があれば差分の大きさで分ける
+
+
+# ---------------------------------------------------------------------------
+# 分類: 答えが正しく遅いだけなら、差分の大きさによらず「考え方は正しい（高速化が必要）」
+# ---------------------------------------------------------------------------
+
+from app.models.mistake_log import LEVEL_ONLY_SLOW  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "changed, total, samples_passed, only_slow, expected",
+    [
+        (10, 22, True, True, LEVEL_ONLY_SLOW),    # 差分が大きくても
+        (1, 22, True, True, LEVEL_ONLY_SLOW),     # 差分が小さくても
+        (10, 22, False, True, LEVEL_ONLY_SLOW),   # 赤ペンで直せなくても、答えは正しいと確かめてある
+        (10, 22, True, False, "考え方"),
+        (1, 22, True, False, "書き方"),
+    ],
+)
+def test_classify_level_only_slow(changed, total, samples_passed, only_slow, expected):
+    assert classify_level(changed, total, samples_passed, only_slow) == expected

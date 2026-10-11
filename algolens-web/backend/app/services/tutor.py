@@ -15,6 +15,7 @@
      最後までだめなら「少ない修正では直せない」とし、「考え方」に分ける
   3. 別解はサンプルと最大サイズの入力で確かめ、通ったときだけ出す
   4. 差分の大きさ（コメント・空行を除く）で「書き方」「考え方」に分ける
+     （0 で答えは正しく遅いだけと確かめられたら「考え方は正しい（高速化が必要）」）
   5. mistake_logs に保存し、同じミスの種類の過去回数を数える
   6. 公式解説ストアを 2 通りの文章で検索する（本問は除く）
   7. AC 済みなら「参考」、未 AC なら「次に解く問題」に分ける
@@ -35,7 +36,14 @@ from bs4 import BeautifulSoup
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.mistake_log import FIX_CONFIRMED, FIX_FAILED, MISTAKE_LEVELS, MISTAKE_TYPES, MistakeLog
+from app.models.mistake_log import (
+    FIX_CONFIRMED,
+    FIX_FAILED,
+    LEVEL_ONLY_SLOW,
+    MISTAKE_LEVELS,
+    MISTAKE_TYPES,
+    MistakeLog,
+)
 from app.services.checkers import (  # noqa: F401  run_samples などは従来どおりここからも使える
     BRUTE_MISMATCH,
     BRUTE_OK,
@@ -124,8 +132,15 @@ def compute_diff(original: str, fixed: str) -> tuple[str, int, int]:
     return diff, changed, len(a_code)
 
 
-def classify_level(changed_lines: int, total_lines: int, samples_passed: bool | None) -> str:
-    """確認を通らなければ「考え方」。通った（または未確認）なら差分の大きさで判定する。"""
+def classify_level(
+    changed_lines: int, total_lines: int, samples_passed: bool | None, only_slow: bool = False
+) -> str:
+    """答えは正しく遅いだけ（only_slow）とプログラムで確かめられたら、差分の大きさによらず
+    「考え方は正しい（高速化が必要）」。それ以外は、確認を通らなければ「考え方」、
+    通った（または未確認）なら差分の大きさで判定する。
+    """
+    if only_slow:
+        return LEVEL_ONLY_SLOW
     if samples_passed is False:
         return "考え方"
     if changed_lines <= SMALL_DIFF_MAX_LINES:
@@ -279,7 +294,12 @@ _BRUTE_SPEC = """- brute_code: 制約は無視してよいので、小さい入�
 # 元のコードの答えが小さい入力ですべて正しく、判定が TLE のとき
 ONLY_SLOW_MESSAGE = (
     "私のコードは小さい入力で答えがすべて正しく（愚直解と比べて確認済み）、遅いだけです。"
-    "答えの出し方は変えずに、遅い部分だけを速くしてください。"
+    "答えの出し方は変えずに、遅い部分だけを速くしてください。\n"
+    "- 書き換えた式は、元の式と同じ値になるようにする（範囲や添字をずらさない）\n"
+    "- 各書き換えの reason には「元の◯◯と同じ値」と書く"
+    "（例: 「元の min(R[0:s-1]) と同じ値を、前もって作った表から O(1) で取り出す」）\n"
+    "- 私のコードに誤りがあるとは書かない（reason・gap_summary・lesson のどれにも）。"
+    "gap_summary には、どこが遅かったかを書く"
 )
 ONLY_SLOW_APPROACH = "**考え方:** あなたの考え方は合っています（答えは正しく、遅いだけです）。"
 
@@ -406,15 +426,20 @@ def build_explanation_prompt(
     similar_lines = "\n".join(f"- {p.problem_id}: {p.title}" for p in similar) or "- なし"
     if only_slow:
         head = (
+            "  あなたの答えは小さい入力ですべて正しく、遅いだけだと確かめてある。\n"
+            "  元のコードに誤り（添字・範囲・場合分けの誤りなど）があるとは書かない。\n"
+            "  赤ペンで書き換えた式は元の式と同じ値を求めるもので、誤りを直したものではない。\n"
             "  最初に、見出しを付けずに「**直し方:**」で始めて、遅い部分をどう速くすればよいかを 1〜2 文で書く\n"
-            "  （あなたの答えは小さい入力ですべて正しく、遅いだけだと確かめてある。「考え方:」の行は書かない）。"
+            "  （「考え方:」の行は書かない）。"
         )
+        first_item = "どこが遅かったか（差分の行を指して。書き換えた式が元のどの式と同じ値かも書く）"
     else:
         head = (
             "  最初に、見出しを付けずに次の 2 つを短く書く（それぞれ「**考え方:**」「**直し方:**」で始める）。\n"
             "  - **考え方:** あなたの考え方が合っているかどうか（合っている / 一部合っている / 違う、を一文で）\n"
             "  - **直し方:** どこをどう直せばよいかを 1〜2 文で"
         )
+        first_item = "どこがずれていたか（差分の行を指して）"
     status = "" if fix_found else (
         "\n※ 少ない修正（赤ペン）では確認を通せませんでした。下の赤ペン案は正しくない可能性があるので、"
         "どこがずれているかと正しい考え方を中心に説明してください。\n"
@@ -459,7 +484,7 @@ def build_explanation_prompt(
 - explanation: Markdown の解説。
 {head}
   そのあとに次の順で、それぞれ 2〜3 文程度の短い説明を書く。
-  1. どこがずれていたか（差分の行を指して）
+  1. {first_item}
   2. 正しい考え方
   3. 同じミスを繰り返さないためのチェックポイント（過去の回数に触れる）
   4. 似た問題で何を確かめるとよいか（問題IDを挙げる。中身は推測で書かない）{alt_item}
@@ -1016,7 +1041,7 @@ def explain(
 
     # ④ 差分と分岐（赤ペンで直せなかったら「考え方」）
     diff, changed, total = compute_diff(code, pen.fixed_code)
-    level = classify_level(changed, total, pen.check.passed if outcome.fix_found else False)
+    level = classify_level(changed, total, pen.check.passed if outcome.fix_found else False, outcome.only_slow)
 
     # ⑤ 同じミスの過去回数（記録の保存は最後に行う）
     past = count_past_same_type(db, pen.mistake_type)
