@@ -19,6 +19,12 @@ if username:
     st.session_state["username"] = username
 
 VERDICT_ICON = {"AC": "✅", "WA": "❌", "TLE": "⏱️", "RE": "💥"}
+# 家庭教師の分類（backend の MISTAKE_LEVELS と同じ順）
+LEVELS = ("書き方", "考え方", "考え方は正しい（高速化が必要）")
+LEVEL_HELP = (
+    "書き方: 少ない変更で直る / 考え方: 変更が大きい、または少ない修正で直せない / "
+    "考え方は正しい（高速化が必要）: 答えは愚直解と全部一致し、遅いだけ（判定 TLE）"
+)
 
 
 # ============================================================
@@ -225,7 +231,7 @@ def render_mistake(result: dict) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("ミスの種類", result["mistake_type"])
-    c2.metric("書き方 / 考え方", result["mistake_level"])
+    c2.metric("分類", result["mistake_level"], help=LEVEL_HELP)
     c3.metric("同じミスの過去回数", f"{result['past_same_type_count']} 回")
     ops = result.get("estimated_ops")
     c4.metric(
@@ -361,6 +367,13 @@ def render_code_form(r: dict) -> None:
         st.rerun()
 
 
+def _level_of(r: dict) -> str:
+    """処理済みの WA / TLE / RE の分類（それ以外は空文字）。"""
+    if r["status"] != "done" or r["kind"] != "mistake":
+        return ""
+    return (r["payload"] or {}).get("mistake_level", "")
+
+
 def render_report(r: dict) -> None:
     url = f"https://atcoder.jp/contests/{r['contest_id']}/tasks/{r['problem_id']}"
     sub_url = f"https://atcoder.jp/contests/{r['contest_id']}/submissions/{r['submission_id']}"
@@ -485,11 +498,16 @@ with tab_review:
             reports, err = _get("/review/reports", username=username, contest_id=shown)
             if err:
                 st.error(err)
-            for r in reports or []:
+            levels = [_level_of(r) for r in reports or []]
+            counts = {lv: levels.count(lv) for lv in LEVELS if lv in levels}
+            if counts:
+                st.caption("分類: " + " ・ ".join(f"{lv} {n} 問" for lv, n in counts.items()), help=LEVEL_HELP)
+            for r, level in zip(reports or [], levels):
                 icon = VERDICT_ICON.get(r["verdict"], "➖")
                 wa = f" ・ WA 等 {r['wa_count']} 回" if r["wa_count"] else ""
                 pending = "" if r["status"] == "done" else " ・ 未処理"
-                with st.expander(f"{icon} {r['title']} — {r['verdict']}{wa}{pending}"):
+                shown_level = f" ・ {level}" if level else ""
+                with st.expander(f"{icon} {r['title']} — {r['verdict']}{wa}{shown_level}{pending}"):
                     render_report(r)
 
 with tab_manual:

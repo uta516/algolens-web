@@ -2,11 +2,13 @@
 
 LLM には修正後のコード全体ではなく変更の一覧を出させ、こちらで元のコードに当てる。
 変更しない行（コメント・空行を含む）は元のまま残るので、全体の書き直しが起きない。
+変更は replace（置き換え）・delete（削除）・insert_after（行の後ろに差し込み）の 3 種類。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 ACTIONS = ("replace", "delete", "insert_after")
+LINE_SLACK = 2  # original が指定の行と合わないとき、前後この行数以内で探す
 
 
 class EditError(ValueError):
@@ -56,37 +58,81 @@ def parse_edits(raw) -> list[Edit]:
     return edits
 
 
-def apply_edits(code: str, edits: list[Edit]) -> str:
-    """元のコードに変更を当てる。行番号・元の行が合わなければ EditError。"""
+def find_original_line(lines: list[str], line: int, original: str) -> int | None:
+    """original が実際にある行番号。
+
+    line の行と一致すればそのまま。合わなければ前後 LINE_SLACK 行以内で一致する行を探し、
+    ちょうど 1 行だけならその行とみなす（LLM の行番号のずれを吸収する）。
+    0 行・2 行以上なら None。一致は前後の空白を除いて比べる。
+    """
+    target = original.strip()
+    if 1 <= line <= len(lines) and lines[line - 1].strip() == target:
+        return line
+    near = [
+        i for i in range(max(1, line - LINE_SLACK), min(len(lines), line + LINE_SLACK) + 1)
+        if i != line and lines[i - 1].strip() == target
+    ]
+    return near[0] if len(near) == 1 else None
+
+
+def resolve_edits(code: str, edits: list[Edit]) -> list[Edit]:
+    """変更の一覧を元のコードと照らし合わせ、行番号を直した一覧を返す。合わなければ EditError。
+
+    合わない変更はまとめて 1 つの EditError にする（LLM に 1 度で全部直してもらうため）。
+    空行は replace で書き込める（その位置への差し込みになる）。コメントの行は変えられない。
+    何も変えない replace は一覧から外す。
+    """
     lines = split_lines(code)
     n = len(lines)
-    replaced: dict[int, list[str]] = {}
-    deleted: set[int] = set()
-    inserted: dict[int, list[str]] = {}
+    touched: set[int] = set()
+    resolved: list[Edit] = []
+    errors: list[str] = []
     for e in edits:
         if e.action == "insert_after":
             if not 0 <= e.line <= n:
-                raise EditError(f"insert_after の line {e.line} が範囲外です（元のコードは {n} 行）。")
-            inserted.setdefault(e.line, []).extend(e.new.split("\n"))
+                errors.append(f"insert_after の line {e.line} が範囲外です（元のコードは {n} 行）。")
+                continue
+            resolved.append(e)
             continue
-        if not 1 <= e.line <= n:
-            raise EditError(f"{e.action} の line {e.line} が範囲外です（元のコードは {n} 行）。")
-        if e.line in replaced or e.line in deleted:
-            raise EditError(f"line {e.line} を 2 回以上 replace / delete しています。1 つにまとめてください。")
-        actual = lines[e.line - 1]
-        if not actual.strip() or actual.strip().startswith("#"):
-            raise EditError(
-                f"line {e.line} は空行かコメントの行です。空行とコメントは変えずに残し、"
-                "新しい行は insert_after で入れてください。"
+        line = find_original_line(lines, e.line, e.original)
+        if line is None:
+            if not 1 <= e.line <= n:
+                errors.append(f"{e.action} の line {e.line} が範囲外です（元のコードは {n} 行）。")
+            else:
+                errors.append(
+                    f"line {e.line} の original が元のコードと合いません。"
+                    f"元のコードの {e.line} 行目は {lines[e.line - 1].strip()!r} です（行番号を確かめてください）。"
+                )
+            continue
+        if line in touched:
+            errors.append(f"line {line} を 2 回以上 replace / delete しています。1 つにまとめてください。")
+            continue
+        actual = lines[line - 1]
+        if actual.strip().startswith("#"):
+            errors.append(
+                f"line {line} はコメントの行です（{actual.strip()!r}）。コメントは変えずに残してください。"
+                "コメントに書かれたコードを使いたいときは、insert_after で新しい行として入れてください。"
             )
-        if e.original.strip() != actual.strip():
-            raise EditError(
-                f"line {e.line} の original が元のコードと合いません。"
-                f"元のコードの {e.line} 行目は {actual.strip()!r} です（行番号を確かめてください）。"
-            )
+            continue
         if e.action == "replace" and e.new.rstrip() == actual.rstrip():
             continue  # 何も変えない replace は無視する
-        if e.action == "replace":
+        touched.add(line)
+        resolved.append(replace(e, line=line))
+    if errors:
+        raise EditError("\n".join(f"- {msg}" for msg in errors) if len(errors) > 1 else errors[0])
+    return resolved
+
+
+def apply_edits(code: str, edits: list[Edit]) -> str:
+    """元のコードに変更を当てる（resolve_edits で行番号を確かめてから）。合わなければ EditError。"""
+    lines = split_lines(code)
+    replaced: dict[int, list[str]] = {}
+    deleted: set[int] = set()
+    inserted: dict[int, list[str]] = {}
+    for e in resolve_edits(code, edits):
+        if e.action == "insert_after":
+            inserted.setdefault(e.line, []).extend(e.new.split("\n"))
+        elif e.action == "replace":
             replaced[e.line] = e.new.split("\n")
         else:
             deleted.add(e.line)

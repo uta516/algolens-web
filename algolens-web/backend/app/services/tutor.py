@@ -1,17 +1,21 @@
 """RAG 家庭教師: 提出コードから赤ペン（最小修正）・別解・ずれの解説・似た問題を返す（docs/rag-tutor-design.md）。
 
 流れ（explain）:
+  0. 保存済みの愚直解があれば元のコードと比べる。反例があればその入力を、反例がなく判定が TLE なら
+     「答えは正しく遅いだけ」を 1 で伝え、解説の「考え方:」もこちらで書く
   1. LLM 1 回目で次をまとめて JSON で受け取る
      - ① 赤ペン: 元のコードへの変更の一覧（行番号・元の行・新しい行・理由）と、計算量・計算回数の目安
      - ② 別解: もっと簡単な解き方があれば（①の代わりにはしない）
      - 確認用コード（愚直解・小さい入力を作るコード・最大サイズの入力を作るコード）。
-       問題ごとに保存し、保存済みなら頼まない
+       問題ごとに保存し、保存済みなら頼まない（保存済みの愚直解がサンプルを通らない・小さい入力を
+       作れないときは捨てて頼み直す）
   2. 赤ペンを元のコードに当てて確かめ、だめなら落ちた確認を伝えて 1 をやり直す（最大 2 回）
      赤ペンの指定 → 変更の大きさ（半分を超えたら書き直しとみなす）→ 計算回数の目安 → サンプル
      → 愚直解との比較 → 最大サイズの入力 の順
      最後までだめなら「少ない修正では直せない」とし、「考え方」に分ける
   3. 別解はサンプルと最大サイズの入力で確かめ、通ったときだけ出す
   4. 差分の大きさ（コメント・空行を除く）で「書き方」「考え方」に分ける
+     （0 で答えは正しく遅いだけと確かめられたら「考え方は正しい（高速化が必要）」）
   5. mistake_logs に保存し、同じミスの種類の過去回数を数える
   6. 公式解説ストアを 2 通りの文章で検索する（本問は除く）
   7. AC 済みなら「参考」、未 AC なら「次に解く問題」に分ける
@@ -32,9 +36,17 @@ from bs4 import BeautifulSoup
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.mistake_log import FIX_CONFIRMED, FIX_FAILED, MISTAKE_LEVELS, MISTAKE_TYPES, MistakeLog
+from app.models.mistake_log import (
+    FIX_CONFIRMED,
+    FIX_FAILED,
+    LEVEL_ONLY_SLOW,
+    MISTAKE_LEVELS,
+    MISTAKE_TYPES,
+    MistakeLog,
+)
 from app.services.checkers import (  # noqa: F401  run_samples などは従来どおりここからも使える
     BRUTE_MISMATCH,
+    BRUTE_OK,
     BRUTE_SKIPPED,
     DEFAULT_TIME_LIMIT_SEC,
     SAMPLE_TIME_LIMIT_SEC,
@@ -58,7 +70,7 @@ from app.services.checkers import (  # noqa: F401  run_samples などは従来�
     run_stress,
 )
 from app.services.editorial_scraper import EDITORIALS_DIR, load_meta, problem_dir
-from app.services.redpen import Edit, EditError, apply_edits, format_edits, parse_edits
+from app.services.redpen import Edit, EditError, apply_edits, format_edits, parse_edits, resolve_edits
 
 MAX_RETRIES = 2              # 1 回目に加えてやり直す回数
 OPS_LIMIT = 10**9            # 計算回数の目安がこれ（10^8 の 10 倍）を超えたら実行せずに作り直す
@@ -120,8 +132,15 @@ def compute_diff(original: str, fixed: str) -> tuple[str, int, int]:
     return diff, changed, len(a_code)
 
 
-def classify_level(changed_lines: int, total_lines: int, samples_passed: bool | None) -> str:
-    """確認を通らなければ「考え方」。通った（または未確認）なら差分の大きさで判定する。"""
+def classify_level(
+    changed_lines: int, total_lines: int, samples_passed: bool | None, only_slow: bool = False
+) -> str:
+    """答えは正しく遅いだけ（only_slow）とプログラムで確かめられたら、差分の大きさによらず
+    「考え方は正しい（高速化が必要）」。それ以外は、確認を通らなければ「考え方」、
+    通った（または未確認）なら差分の大きさで判定する。
+    """
+    if only_slow:
+        return LEVEL_ONLY_SLOW
     if samples_passed is False:
         return "考え方"
     if changed_lines <= SMALL_DIFF_MAX_LINES:
@@ -265,10 +284,32 @@ MAX_GENERATORS_SPEC = f"""- max_input_generators: 制約の上限ちょうどの
   - 形の違う入力にする（例: ランダム / 整列済み / 同じ値ばかり / 素朴な解き方が遅くなる形）
   - 入力形式と制約を必ず守る。乱数は random.seed(0) で固定する。標準入力は読まない。コードブロック記号は付けない"""
 _BRUTE_SPEC = """- brute_code: 制約は無視してよいので、小さい入力で確実に正しい答えを出す素朴な Python コード（全探索など）。
-  標準入力から読み標準出力に書く。コードブロック記号は付けない
+  標準入力から読み標準出力に書く。コードブロック記号は付けない。
+  私のコードを写さず、問題文から独立に書く（私のコードの答えを確かめるのに使うため）
 - small_input_generator: sys.argv[1] を乱数の種にして、制約を満たす小さい入力を 1 つ標準出力に書く Python コード
   - 大きさは brute_code がすぐ終わる程度（N は 1〜8 くらい）。値の範囲も小さくして、答えが偏らないようにする
   - 標準入力は読まない。コードブロック記号は付けない"""
+
+
+# 元のコードの答えが小さい入力ですべて正しく、判定が TLE のとき
+ONLY_SLOW_MESSAGE = (
+    "私のコードは小さい入力で答えがすべて正しく（愚直解と比べて確認済み）、遅いだけです。"
+    "答えの出し方は変えずに、遅い部分だけを速くしてください。\n"
+    "- 書き換えた式は、元の式と同じ値になるようにする（範囲や添字をずらさない）\n"
+    "- 各書き換えの reason には「元の◯◯と同じ値」と書く"
+    "（例: 「元の min(R[0:s-1]) と同じ値を、前もって作った表から O(1) で取り出す」）\n"
+    "- 私のコードに誤りがあるとは書かない（reason・gap_summary・lesson のどれにも）。"
+    "gap_summary には、どこが遅かったかを書く"
+)
+ONLY_SLOW_APPROACH = "**考え方:** あなたの考え方は合っています（答えは正しく、遅いだけです）。"
+
+
+def answers_only_slow(verdict: str, original_brute: BruteCheck | None) -> bool:
+    """元のコードは答えが正しく、遅いだけか（判定が TLE で、小さい入力で愚直解と全部一致した）。
+
+    愚直解と比べられなかったとき（愚直解がない・比較を飛ばした）は分からないので False。
+    """
+    return verdict == "TLE" and original_brute is not None and original_brute.status == BRUTE_OK
 
 
 def number_lines(code: str) -> str:
@@ -290,13 +331,17 @@ def build_first_prompt(
     need_brute: bool = False,
     need_max: bool = False,
     counterexample: str = "",
+    only_slow: bool = False,
 ) -> str:
     """previous_failure: 前回の修正版を提出して通らなかったときの内容（やり直しのたびに渡す）。
     counterexample: 元のコードが愚直解と違う答えを出した小さい入力（あればバグの場所の手がかりにする）。
+    only_slow: 元のコードが小さい入力で愚直解と全部一致し、判定が TLE（答えは正しく遅いだけ）。
     """
     previous = f"\n## 前回の修正版を提出した結果\n{previous_failure}\n" if previous_failure else ""
     if counterexample:
         previous += f"\n## 私のコードが間違える小さい入力（愚直解と比べて見つけたもの）\n{counterexample}\n"
+    if only_slow:
+        previous += f"\n## 答えの確認（プログラムで確かめた結果）\n{ONLY_SLOW_MESSAGE}\n"
     retry = f"\n## 前回の赤ペンの問題点\n{feedback}\nこれを踏まえて赤ペンを直してください。\n" if feedback else ""
     tasks = ["① 赤ペン: 私のコードの考え方を残したまま、間違っている行だけを直す変更の一覧"]
     outputs = []
@@ -325,15 +370,21 @@ def build_first_prompt(
 - 私のコードの考え方・構造・変数名を残し、バグの原因の行だけを直す。全体の書き直しは禁止
 - まず「私の考え方のままで、どの行をどう変えれば正しくなるか」を考える。
   初期値を変える・不等号を変える・分岐の中身を差し替える・条件を 1 つ足す、のような小さな直しを優先する
-- 変える行（コメント・空行を除く）は元のコードの半分以下にする。超えると書き直しとみなして受け付けない
+- 変える行（書き換えた行と差し込んだ行。コメント・空行を除く）は元のコードの半分以下にする。
+  超えると書き直しとみなして受け付けない
 - 変更は edits の一覧で表す。下のコードの行番号を使う
   - action "replace": line の行を new に置き換える（original にはその行の元の内容）。
     new は複数行でもよい（1 行を数行のブロックに置き換えられる）
   - action "delete": line の行を消す（original にはその行の元の内容、new は空文字）
-  - action "insert_after": line の行の後に new を入れる（先頭なら line は 0、original は空文字）
+  - action "insert_after": line の行の後に new を入れる（先頭なら line は 0、original は空文字）。
+    前もって表や配列を作る行を足すときなどに使う
   - new はインデントも含めて書く。複数行なら改行で区切る
+  - original には、その行番号の行の内容をそのまま写す（行番号と内容がずれていると受け付けない）
   - reason: なぜ直すかを短く
-- 空行とコメントの行は edits の対象にしない（そのまま残す）。内容を変えない replace も書かない
+- 空行は replace で書き込んでよい（original は空文字）
+- コメントの行（# で始まる行）は replace / delete できない。コメントに書かれたコード
+  （例: import sys; input = sys.stdin.readline）を使いたいときは、insert_after で新しい行として入れる
+- 内容を変えない replace は書かない
 - 直す行が少ないほど良い。使わなくなった行も、動作に影響しなければ残してよい
 - 制約の上限の入力でも制限時間（{problem.time_limit_sec:g} 秒）に間に合うこと
 
@@ -369,8 +420,26 @@ def build_explanation_prompt(
     complexity: str = "",
     fix_found: bool = True,
     alternative: "Alternative | None" = None,
+    only_slow: bool = False,
 ) -> str:
+    """only_slow のときは「考え方:」をこちらで書くので、Gemini には「直し方:」から書いてもらう。"""
     similar_lines = "\n".join(f"- {p.problem_id}: {p.title}" for p in similar) or "- なし"
+    if only_slow:
+        head = (
+            "  あなたの答えは小さい入力ですべて正しく、遅いだけだと確かめてある。\n"
+            "  元のコードに誤り（添字・範囲・場合分けの誤りなど）があるとは書かない。\n"
+            "  赤ペンで書き換えた式は元の式と同じ値を求めるもので、誤りを直したものではない。\n"
+            "  最初に、見出しを付けずに「**直し方:**」で始めて、遅い部分をどう速くすればよいかを 1〜2 文で書く\n"
+            "  （「考え方:」の行は書かない）。"
+        )
+        first_item = "どこが遅かったか（差分の行を指して。書き換えた式が元のどの式と同じ値かも書く）"
+    else:
+        head = (
+            "  最初に、見出しを付けずに次の 2 つを短く書く（それぞれ「**考え方:**」「**直し方:**」で始める）。\n"
+            "  - **考え方:** あなたの考え方が合っているかどうか（合っている / 一部合っている / 違う、を一文で）\n"
+            "  - **直し方:** どこをどう直せばよいかを 1〜2 文で"
+        )
+        first_item = "どこがずれていたか（差分の行を指して）"
     status = "" if fix_found else (
         "\n※ 少ない修正（赤ペン）では確認を通せませんでした。下の赤ペン案は正しくない可能性があるので、"
         "どこがずれているかと正しい考え方を中心に説明してください。\n"
@@ -412,8 +481,10 @@ def build_explanation_prompt(
 {similar_lines}
 
 ## 出力（JSON）
-- explanation: Markdown の解説。次の順で簡潔に。
-  1. どこがずれていたか（差分の行を指して）
+- explanation: Markdown の解説。
+{head}
+  そのあとに次の順で、それぞれ 2〜3 文程度の短い説明を書く。
+  1. {first_item}
   2. 正しい考え方
   3. 同じミスを繰り返さないためのチェックポイント（過去の回数に触れる）
   4. 似た問題で何を確かめるとよいか（問題IDを挙げる。中身は推測で書かない）{alt_item}
@@ -444,12 +515,14 @@ def _failure_feedback(check: SampleCheck) -> str:
     return msg
 
 
-def _counterexample(code: str, brute_cases: BruteCases | None, checks: "Checks") -> str:
-    """元のコードを愚直解の入力で実行し、最初に答えが違った入力を説明する文（なければ空文字）。"""
-    if brute_cases is None:
-        return ""
-    result = checks.compare_brute(code, brute_cases)
-    if result.status != BRUTE_MISMATCH:
+def _compare_original(code: str, brute_cases: BruteCases | None, checks: "Checks") -> BruteCheck | None:
+    """元のコードを愚直解の入力で実行した結果（愚直解がなければ None）。"""
+    return checks.compare_brute(code, brute_cases) if brute_cases is not None else None
+
+
+def _counterexample(result: BruteCheck | None) -> str:
+    """元のコードが最初に愚直解と違う答えを出した入力を説明する文（なければ空文字）。"""
+    if result is None or result.status != BRUTE_MISMATCH:
         return ""
     fail = result.failure
     msg = f"入力:\n{fail.input}\n正しい答え:\n{fail.expected}\n"
@@ -559,6 +632,7 @@ class FixOutcome:
     attempt_log: list[Attempt]
     alternative: Alternative | None
     notes: list[str]             # 確認用コード・別解についての警告
+    only_slow: bool = False      # 元のコードは答えが正しく、遅いだけ（answers_only_slow）
 
 
 def _parse_ops(value) -> float | None:
@@ -588,8 +662,15 @@ def _parse_analysis(data: dict) -> dict | None:
     }
 
 
+def same_code(a: str, b: str) -> bool:
+    """コメント・空行・行頭行末の空白を除いて同じコードか。"""
+    def key(code: str) -> list[str]:
+        return [line.strip() for line in _normalize_lines(code) if _is_code_line(line)]
+    return key(a) == key(b)
+
+
 def _absorb_checkers(
-    data: dict, problem: ProblemData, checkers: ProblemCheckers, checks: Checks, notes: list[str]
+    data: dict, problem: ProblemData, code: str, checkers: ProblemCheckers, checks: Checks, notes: list[str]
 ) -> BruteCases | None:
     """LLM が出した確認用コードを確かめ、使えるものを保存する。新しく使えるようになった愚直解の入力を返す。"""
     changed = False
@@ -597,7 +678,9 @@ def _absorb_checkers(
     if not checkers.has_brute:
         brute, small = _code_field(data, "brute_code"), _code_field(data, "small_input_generator")
         if brute and small:
-            if checks.runner(brute, problem.samples).passed is False:
+            if same_code(brute, code):
+                notes.append("愚直解があなたのコードと同じだったため、愚直解との比較には使いません")
+            elif checks.runner(brute, problem.samples).passed is False:
                 notes.append("愚直解がサンプルを通らなかったため、愚直解との比較には使いません")
             else:
                 cases = checks.prepare_brute(brute, small)
@@ -623,6 +706,32 @@ def _absorb_checkers(
     return brute_cases
 
 
+def _load_saved_brute(
+    problem: ProblemData, code: str, checkers: ProblemCheckers, checks: Checks, notes: list[str]
+) -> BruteCases | None:
+    """保存済みの愚直解を確かめて小さい入力を用意する。
+
+    愚直解がサンプルを通らない、小さい入力を作れない、または今回のコードと同じ（比べても意味がない）
+    ときは、保存したものを捨てる（checkers から消して保存し直すので、次の赤ペンの呼び出しで作り直しを頼む）。
+    """
+    if not checkers.has_brute:
+        return None
+    reason = ""
+    if same_code(checkers.brute_code, code):
+        reason = "保存済みの愚直解があなたのコードと同じだった"
+    elif checks.runner(checkers.brute_code, problem.samples).passed is False:
+        reason = "保存済みの愚直解がサンプルを通らなかった"
+    else:
+        cases = checks.prepare_brute(checkers.brute_code, checkers.small_generator)
+        if not cases.note:
+            return cases
+        reason = f"保存済みの愚直解で比較の準備に失敗した（{cases.note}）"
+    notes.append(f"{reason}ため、捨てて作り直しました")
+    checkers.brute_code = checkers.small_generator = ""
+    checks.store.save(problem.problem_id, checkers)
+    return None
+
+
 def _verify_redpen(
     code: str,
     data: dict,
@@ -638,7 +747,8 @@ def _verify_redpen(
     の順に確かめ、だめな時点で止める。落ちた確認が None なら全部通った。
     """
     try:
-        edits = parse_edits(data.get("edits"))
+        # 行番号のずれ（前後 2 行以内で 1 行だけ一致）は直した行番号で記録する
+        edits = resolve_edits(code, parse_edits(data.get("edits")))
         fixed = apply_edits(code, edits)
     except EditError as e:
         return None, CHECK_EDITS, str(e), str(e)
@@ -720,16 +830,13 @@ def generate_fix(
     checks = checks or Checks()
     notes: list[str] = []
     checkers = checks.store.load(problem.problem_id)
-    brute_cases = None
-    if checkers.has_brute:
-        brute_cases = checks.prepare_brute(checkers.brute_code, checkers.small_generator)
-        if brute_cases.note:
-            notes.append(f"保存済みの愚直解で比較の準備に失敗しました: {brute_cases.note}")
-            brute_cases = None
-    # 元のコードが間違える小さい入力。愚直解がまだなければ、1 回目の応答で得てから求める
-    counterexample = _counterexample(code, brute_cases, checks)
+    brute_cases = _load_saved_brute(problem, code, checkers, checks, notes)
+    # 元のコードを愚直解と比べる。反例があればその入力を、なく TLE なら「遅いだけ」を伝える。
+    # 愚直解がまだなければ、1 回目の応答で得てから比べる（2 回目以降の依頼に反映）
+    original_brute = _compare_original(code, brute_cases, checks)
 
     feedback = ""
+    edit_errors: list[str] = []   # これまでの「赤ペンの指定」の誤り（同じ誤りを繰り返さないよう毎回伝える）
     last: RedPen | None = None
     last_analysis: dict | None = None
     first_data: dict | None = None
@@ -740,16 +847,17 @@ def generate_fix(
         prompt = build_first_prompt(
             problem, code, verdict, feedback, previous_failure,
             ask_alternative=attempt == 1, need_brute=need_brute, need_max=need_max,
-            counterexample=counterexample,
+            counterexample=_counterexample(original_brute),
+            only_slow=answers_only_slow(verdict, original_brute),
         )
         data = generate(prompt, first_pass_schema(attempt == 1, need_brute, need_max))
         if attempt == 1:
             first_data = data
         if need_brute or need_max:
-            absorbed = _absorb_checkers(data, problem, checkers, checks, notes)
+            absorbed = _absorb_checkers(data, problem, code, checkers, checks, notes)
             if absorbed is not None:
                 brute_cases = absorbed
-                counterexample = _counterexample(code, brute_cases, checks)
+                original_brute = _compare_original(code, brute_cases, checks)
 
         analysis = _parse_analysis(data)
         if analysis is None:
@@ -759,6 +867,11 @@ def generate_fix(
         last_analysis = analysis
         pen, failed, feedback, detail = _verify_redpen(code, data, analysis, problem, checkers, brute_cases, checks)
         log.append(Attempt(attempt, failed, detail))
+        if edit_errors and failed is not None:
+            earlier = "\n".join(edit_errors)
+            feedback += f"\n\nそれより前の赤ペンでも、次の指定を受け付けませんでした（同じ指定を繰り返さないで）:\n{earlier}"
+        if failed == CHECK_EDITS:
+            edit_errors.append(detail)
         if pen is not None:
             last = pen
         if failed is None:
@@ -777,6 +890,7 @@ def generate_fix(
     alternative = _check_alternative(first_data or {}, problem, checkers, checks, notes)
     return FixOutcome(
         redpen=last, fix_found=found, attempts=len(log), attempt_log=log, alternative=alternative, notes=notes,
+        only_slow=answers_only_slow(verdict, original_brute),
     )
 
 
@@ -927,7 +1041,7 @@ def explain(
 
     # ④ 差分と分岐（赤ペンで直せなかったら「考え方」）
     diff, changed, total = compute_diff(code, pen.fixed_code)
-    level = classify_level(changed, total, pen.check.passed if outcome.fix_found else False)
+    level = classify_level(changed, total, pen.check.passed if outcome.fix_found else False, outcome.only_slow)
 
     # ⑤ 同じミスの過去回数（記録の保存は最後に行う）
     past = count_past_same_type(db, pen.mistake_type)
@@ -940,11 +1054,18 @@ def explain(
     prompt = build_explanation_prompt(
         problem, code, pen.fixed_code, diff, pen.gap_summary, pen.correct_idea,
         pen.mistake_type, past, similar, pen.complexity, outcome.fix_found, outcome.alternative,
+        only_slow=outcome.only_slow,
     )
     explanation = generate(prompt, EXPLANATION_SCHEMA).get("explanation", "")
     if not isinstance(explanation, str) or not explanation.strip():
         explanation = ""
         warnings.append("解説の生成に失敗しました（LLM の出力が空でした）")
+    elif outcome.only_slow:
+        # 「考え方:」はプログラムで確かめた結果をこちらで書く（LLM が書いてきた行は外す）
+        body = "\n".join(
+            line for line in explanation.strip().split("\n") if not line.lstrip("-* ").startswith("考え方:")
+        )
+        explanation = f"{ONLY_SLOW_APPROACH}\n{body}"
 
     # ⑤ 記録帳: 途中で LLM が失敗したときに記録だけ残らないよう、すべて揃ってから保存する
     log = save_mistake_log(

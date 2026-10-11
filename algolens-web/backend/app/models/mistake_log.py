@@ -13,7 +13,9 @@ MISTAKE_TYPES: tuple[str, ...] = (
     "実装ミス",
     "読み違い",
 )
-MISTAKE_LEVELS: tuple[str, ...] = ("書き方", "考え方")
+# 「考え方は正しい（高速化が必要）」は、判定が TLE で元のコードの答えが愚直解と全部一致したとき
+LEVEL_ONLY_SLOW = "考え方は正しい（高速化が必要）"
+MISTAKE_LEVELS: tuple[str, ...] = ("書き方", "考え方", LEVEL_ONLY_SLOW)
 # fix_status: 修正版を提出した結果。None は「提出での確認はまだ」
 FIX_CONFIRMED = "確認済み"   # 提出して AC
 FIX_FAILED = "修正失敗"      # 提出して AC 以外。同じミスの回数の集計から外す
@@ -35,7 +37,7 @@ class MistakeLog(Base):
     verdict: Mapped[str] = mapped_column(String(10), nullable=False)
     diff_lines: Mapped[int] = mapped_column(Integer, nullable=False)
     # MISTAKE_LEVELS のいずれか
-    mistake_level: Mapped[str] = mapped_column(String(10), nullable=False)
+    mistake_level: Mapped[str] = mapped_column(String(30), nullable=False)
     # MISTAKE_TYPES のいずれか
     mistake_type: Mapped[str] = mapped_column(String(30), index=True, nullable=False)
     # サンプルがなく確認を飛ばした場合は None
