@@ -408,7 +408,7 @@ def test_apply_edits_keeps_comments_and_blank_lines():
 
 def test_apply_edits_rejects_wrong_original_and_delete():
     with pytest.raises(EditError, match="合いません"):
-        apply_edits(_ORIGINAL, parse_edits([{"line": 1, "action": "replace", "original": "print(a * b)", "new": "x", "reason": ""}]))
+        apply_edits(_ORIGINAL, parse_edits([{"line": 1, "action": "replace", "original": "print(a / b)", "new": "x", "reason": ""}]))
     edits = parse_edits([{"line": 2, "action": "delete", "original": "print(a * b)", "new": "", "reason": ""}])
     assert apply_edits(_ORIGINAL, edits) == "a, b = map(int, input().split())\n"
 
@@ -421,7 +421,7 @@ def test_compute_diff_ignores_comment_and_blank_lines():
 
 
 def test_edits_that_do_not_match_code_are_retried(db):
-    bad = {"edits": [{"line": 1, "action": "replace", "original": "print(a * b)", "new": _RIGHT_LINE, "reason": ""}],
+    bad = {"edits": [{"line": 1, "action": "replace", "original": "print(a / b)", "new": _RIGHT_LINE, "reason": ""}],
            "estimated_ops": 1}
     llm = _FakeLLM([bad, _edit(_RIGHT_LINE)])
 
@@ -820,3 +820,104 @@ def test_counterexample_for_original_code_is_shown_to_llm(db):
     prompt = _first_pass_prompts(llm)[0]
     assert "私のコードが間違える小さい入力" in prompt
     assert "2 5" in prompt and "10" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 行番号のずれ（前後 2 行以内で 1 行だけ一致すれば、その行とみなす）
+# ---------------------------------------------------------------------------
+
+from app.services.redpen import find_original_line, resolve_edits  # noqa: E402
+
+_SHIFTED = "a = 1\nb = 2\nprint(a)\nc = 3\nd = 4\ne = 5\nprint(a)\n"
+
+
+@pytest.mark.parametrize("line, original, expected", [
+    (3, "print(a)", 3),     # 指定どおり
+    (2, "c = 3", 4),        # 2 行ずれ → 1 行だけ一致
+    (6, "c = 3", 4),
+    (1, "d = 4", None),     # 3 行ずれは探さない
+    (5, "print(a)", None),  # 前後 2 行以内に 2 行（3 行目と 7 行目）一致する
+    (2, "x = 0", None),     # どこにもない
+])
+def test_find_original_line(line, original, expected):
+    from app.services.redpen import split_lines
+    assert find_original_line(split_lines(_SHIFTED), line, original) == expected
+
+
+def test_shifted_line_number_is_corrected_and_applied():
+    edits = parse_edits([{"line": 3, "action": "replace", "original": "c = 3", "new": "c = 30", "reason": ""}])
+    resolved = resolve_edits(_SHIFTED, edits)
+    assert resolved[0].line == 4
+    assert apply_edits(_SHIFTED, edits) == "a = 1\nb = 2\nprint(a)\nc = 30\nd = 4\ne = 5\nprint(a)\n"
+
+
+def test_ambiguous_shifted_line_is_rejected():
+    edits = parse_edits([{"line": 5, "action": "delete", "original": "print(a)", "new": "", "reason": ""}])
+    with pytest.raises(EditError, match="original が元のコードと合いません"):
+        apply_edits(_SHIFTED, edits)
+
+
+def test_shifted_line_still_cannot_touch_comments():
+    code = "x = 1\n# x = 2\ny = 3\n"
+    edits = parse_edits([{"line": 1, "action": "replace", "original": "# x = 2", "new": "x = 2", "reason": ""}])
+    with pytest.raises(EditError, match="コメントの行"):
+        apply_edits(code, edits)
+
+
+# ---------------------------------------------------------------------------
+# 答えが正しく遅いだけか（元のコードと愚直解の比較で振り分ける）
+# ---------------------------------------------------------------------------
+
+from app.services.checkers import BRUTE_MISMATCH, BRUTE_SKIPPED, BruteCheck  # noqa: E402
+from app.services.tutor import ONLY_SLOW_APPROACH, ONLY_SLOW_MESSAGE, answers_only_slow  # noqa: E402
+
+
+@pytest.mark.parametrize("verdict, brute, expected", [
+    ("TLE", BruteCheck(BRUTE_OK, total=30, matched=30), True),
+    ("TLE", BruteCheck(BRUTE_MISMATCH, total=3, matched=2), False),
+    ("TLE", BruteCheck(BRUTE_SKIPPED, note="入力なし"), False),
+    ("TLE", None, False),                                   # 愚直解がない
+    ("WA", BruteCheck(BRUTE_OK, total=30, matched=30), False),
+])
+def test_answers_only_slow(verdict, brute, expected):
+    assert answers_only_slow(verdict, brute) is expected
+
+
+class _ExplainLLM(_FakeLLM):
+    """最終解説で「考え方:」の行も書いてくる偽物。"""
+
+    def __call__(self, prompt, schema):
+        if "explanation" in schema["properties"]:
+            self.prompts.append(prompt)
+            return {"explanation": "**考え方:** 一部合っています。\n**直し方:** 表を作る。\n詳しく"}
+        return super().__call__(prompt, schema)
+
+
+_SLOW_ORIGINAL = "a, b = map(int, input().split())\nprint(sum([a, b]))\n"  # 答えは正しい（遅い想定）
+
+
+def test_tle_with_correct_answers_is_told_only_slow(db):
+    llm = _ExplainLLM([{"edits": [{"line": 2, "action": "replace", "original": "print(sum([a, b]))",
+                                   "new": _RIGHT_LINE, "reason": ""}], "estimated_ops": 1}])
+
+    result = explain(db, llm, None, _PROBLEM, _SLOW_ORIGINAL, "TLE", body_text="",
+                     checks=_checks(brute=True, compare_brute=compare_with_brute))
+
+    first = _first_pass_prompts(llm)[0]
+    assert ONLY_SLOW_MESSAGE in first
+    assert "私のコードが間違える小さい入力" not in first
+    assert result.explanation.split("\n")[0] == ONLY_SLOW_APPROACH
+    assert "一部合っています" not in result.explanation
+    assert "**直し方:** 表を作る。" in result.explanation
+
+
+def test_tle_with_counterexample_is_told_the_input(db):
+    llm = _ExplainLLM([_edit(_RIGHT_LINE)])  # 元のコード（掛け算）は 2 5 で 10 を出し、正しい答え 7 と違う
+
+    result = explain(db, llm, None, _PROBLEM, _ORIGINAL, "TLE", body_text="",
+                     checks=_checks(brute=True, compare_brute=compare_with_brute))
+
+    first = _first_pass_prompts(llm)[0]
+    assert "私のコードが間違える小さい入力" in first
+    assert ONLY_SLOW_MESSAGE not in first
+    assert result.explanation.startswith("**考え方:** 一部合っています。")
